@@ -113,7 +113,14 @@ const PortfolioTab = (() => {
       GROUP BY l.Symbol
       HAVING SUM(l.Quantity) > 0`, params);
 
-    const total = rows.reduce((s, r) => s + (r.Value || 0), 0);
+    const assetsTotal = rows.reduce((s, r) => s + (r.Value || 0), 0);
+
+    const cashRes = accountId
+      ? DB.query('SELECT COALESCE(SUM(Cash), 0) AS TotalCash FROM Accounts WHERE Account_ID = ? AND Active = 1', [accountId])
+      : DB.query('SELECT COALESCE(SUM(Cash), 0) AS TotalCash FROM Accounts WHERE Active = 1');
+    const cash  = cashRes[0]?.TotalCash || 0;
+    const total = assetsTotal + cash;
+
     rows.forEach(r => {
       r.Percent      = total > 0 ? (r.Value || 0) / total * 100 : 0;
       r.GainLossPct  = r.CostBasis ? r.GainLoss / r.CostBasis * 100 : null;
@@ -135,7 +142,51 @@ const PortfolioTab = (() => {
       parsed.quantity = parsed.sell ? -ownedQty : ownedQty;
     }
 
-    const accounts = DB.query('SELECT Account_ID, Account, Name FROM Accounts WHERE Active=1 ORDER BY Name');
+    // Validate symbol via Yahoo Finance if not already in the Assets table
+    const knownAsset = DB.query('SELECT Symbol FROM Assets WHERE Symbol=?', [parsed.symbol]);
+    if (!knownAsset.length) {
+      let quote = null;
+      try {
+        quote = await YahooFinance.getQuote(parsed.symbol);
+      } catch (e) {
+        await Dialogs.alert(`"${parsed.symbol}" is not a valid ticker symbol (${e.message}). Please correct the transaction.`);
+        return;
+      }
+      if (!quote || (quote.regularMarketPrice == null && quote.regularMarketPreviousClose == null)) {
+        await Dialogs.alert(`"${parsed.symbol}" does not appear to be a valid ticker symbol. Please correct the transaction.`);
+        return;
+      }
+    }
+
+    const isSell  = parsed.quantity < 0;
+    const sellQty = Math.abs(parsed.quantity || 0);
+
+    let accounts;
+    if (isSell) {
+      const accFilter = accountId ? 'AND a.Account_ID = ?' : '';
+      const params    = accountId
+        ? [parsed.symbol, accountId, sellQty]
+        : [parsed.symbol, sellQty];
+      accounts = DB.query(`
+        SELECT a.Account_ID, a.Account, a.Name,
+          COALESCE(SUM(l.Quantity), 0) AS Holdings
+        FROM Accounts a
+        LEFT JOIN Ledger l ON l.Account_ID = a.Account_ID AND l.Symbol = ? AND l.Valid = 1
+        WHERE a.Active = 1 ${accFilter}
+        GROUP BY a.Account_ID
+        HAVING COALESCE(SUM(l.Quantity), 0) >= ?
+        ORDER BY a.Name`, params);
+      if (!accounts.length) {
+        await Dialogs.alert(
+          accountId
+            ? `Insufficient holdings of ${parsed.symbol} in this account to sell ${sellQty} share(s).`
+            : `No account holds enough ${parsed.symbol} to sell ${sellQty} share(s).`);
+        return;
+      }
+    } else {
+      accounts = DB.query('SELECT Account_ID, Account, Name FROM Accounts WHERE Active=1 ORDER BY Name');
+    }
+
     if (!accounts.length) { await Dialogs.alert('No accounts found. Create an account first.'); return; }
 
     const accOpts = accounts.map(a =>

@@ -69,7 +69,6 @@ const TransactionsTab = (() => {
       height: '100%',
       initialSort: [{ column: 'Timestamp', dir: 'asc' }],
       columns: [
-        { title: 'Account',   field: 'Account',   headerFilter: true, headerSortTristate: true },
         { title: 'Name',      field: 'Name',      headerFilter: true, headerSortTristate: true },
         { title: 'Type',      field: 'TxType',    headerFilter: true, headerSortTristate: true },
         { title: 'Timestamp', field: 'Timestamp', headerFilter: true, headerSortTristate: true },
@@ -91,6 +90,8 @@ const TransactionsTab = (() => {
     });
 
     panel.addEventListener('keydown', e => {
+      const tag = e.target.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
       if (e.key === 'Delete' && _selected && !_isNew) _delete(_selected);
     });
 

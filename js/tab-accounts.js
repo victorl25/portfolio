@@ -48,15 +48,6 @@ const AccountsTab = (() => {
       selectableRows: 1,
       height: '100%',
       columns: [
-        { title: 'Account', field: 'Account', headerFilter: true, headerSortTristate: true,
-          formatter: cell => {
-            const a = document.createElement('a');
-            a.className = 'cell-link';
-            a.textContent = cell.getValue();
-            a.addEventListener('click', e => { e.stopPropagation(); PortfolioTab.open(cell.getRow().getData().Account_ID); });
-            return a;
-          }
-        },
         { title: 'Name', field: 'Name', headerFilter: true, headerSortTristate: true,
           formatter: cell => {
             const a = document.createElement('a');
@@ -82,6 +73,8 @@ const AccountsTab = (() => {
     });
 
     panel.addEventListener('keydown', e => {
+      const tag = e.target.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
       if (e.key === 'Delete' && _selectedRow && !_isNew) _deleteSelected();
     });
 

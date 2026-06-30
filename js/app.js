@@ -364,6 +364,69 @@ async function cmdSave() {
   _renderStatus();
 }
 
+async function cmdExport() {
+  if (!DB.isLoaded()) { await Dialogs.alert('No database loaded.'); return; }
+
+  const rows = DB.query(`
+    SELECT l.Symbol,
+      SUM(l.Quantity) AS Quantity,
+      SUM(l.Quantity) * COALESCE(p.Price, 0) AS Value,
+      a.Description, a.Type, a.Category, a.Notes
+    FROM Ledger l
+    LEFT JOIN (
+      SELECT Symbol, Price FROM Prices
+      WHERE Valid = 1
+      GROUP BY Symbol
+      HAVING Timestamp = MAX(Timestamp)
+    ) p ON l.Symbol = p.Symbol
+    LEFT JOIN Assets a ON l.Symbol = a.Symbol
+    WHERE l.Valid = 1
+    GROUP BY l.Symbol
+    HAVING SUM(l.Quantity) > 0
+    ORDER BY l.Symbol`);
+
+  if (!rows.length) { await Dialogs.alert('No holdings to export.'); return; }
+
+  const total = rows.reduce((s, r) => s + (r.Value || 0), 0);
+
+  const _csvCell = v => {
+    const s = String(v ?? '');
+    return /[,"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+
+  const header = ['Symbol', 'Quantity', 'Value', '%Portfolio', 'Description', 'Type', 'Category', 'Notes'];
+  const lines  = [header.join(',')];
+  for (const r of rows) {
+    const pct = total > 0 ? ((r.Value || 0) / total * 100).toFixed(2) : '0.00';
+    lines.push([
+      _csvCell(r.Symbol),
+      _csvCell(r.Quantity != null ? +r.Quantity : ''),
+      _csvCell(r.Value    != null ? (+r.Value).toFixed(2) : '0.00'),
+      _csvCell(pct),
+      _csvCell(r.Description),
+      _csvCell(r.Type),
+      _csvCell(r.Category),
+      _csvCell(r.Notes)
+    ].join(','));
+  }
+  const csv = lines.join('\r\n') + '\r\n';
+
+  const d = new Date(), p = n => String(n).padStart(2, '0');
+  const suggestedName = `portfolio_${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}.csv`;
+
+  try {
+    const fh = await window.showSaveFilePicker({
+      id: 'portfolio-export',
+      startIn: _lastFileHandle || undefined,
+      suggestedName,
+      types: [{ description: 'CSV file', accept: { 'text/csv': ['.csv'] } }]
+    });
+    const writable = await fh.createWritable();
+    await writable.write(csv);
+    await writable.close();
+  } catch { return; }
+}
+
 async function cmdUpdatePrices() {
   const assets = DB.query(`
     SELECT l.Symbol, a.Type
@@ -404,7 +467,7 @@ async function cmdUpdatePrices() {
     } catch (e) {
       failures.push({ symbol: a.Symbol, reason: e.message });
     }
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise(r => setTimeout(r, 100));
   }
 
   Dialogs.close();
@@ -473,6 +536,7 @@ function _initMenus() {
   cmd('cmd-new').addEventListener('click', () => { _closeMenus(); cmdNew(); });
   cmd('cmd-open').addEventListener('click', () => { _closeMenus(); cmdOpen(); });
   cmd('cmd-import').addEventListener('click', () => { _closeMenus(); Import.run(); });
+  cmd('cmd-export').addEventListener('click', () => { _closeMenus(); cmdExport(); });
   cmd('cmd-save').addEventListener('click', () => { _closeMenus(); cmdSave(); });
 
   cmd('cmd-view-portfolio').addEventListener('click', () => { _closeMenus(); PortfolioTab.open(); });

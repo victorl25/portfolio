@@ -170,12 +170,19 @@ html, body {
 }
 
 .tab-panel {
-  display: none;
-  height: 100%;
+  position: absolute;
+  inset: 0;
+  visibility: hidden;
+  pointer-events: none;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
-.tab-panel.active { display: flex; flex-direction: column; }
+.tab-panel.active {
+  visibility: visible;
+  pointer-events: auto;
+}
 
 /* ── Tab layout (table + form split) ───────────────────────────────── */
 .tab-layout {

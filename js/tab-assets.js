@@ -55,6 +55,12 @@ const AssetsTab = (() => {
             return a;
           }
         },
+        { title: 'Quantity', field: 'Quantity', widthGrow: 1, headerSortTristate: true,
+          formatter: cell => {
+            const v = cell.getValue();
+            return v != null ? (+v).toLocaleString('en-US', { maximumFractionDigits: 4 }) : '';
+          }
+        },
         { title: 'Description', field: 'Description', widthGrow: 2, headerFilter: true, headerSortTristate: true },
         { title: 'Type',        field: 'Type',        widthGrow: 1, headerFilter: true, headerSortTristate: true },
         { title: 'Category',    field: 'Category',    widthGrow: 2, headerFilter: true, headerSortTristate: true },
@@ -70,6 +76,8 @@ const AssetsTab = (() => {
     });
 
     panel.addEventListener('keydown', e => {
+      const tag = e.target.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
       if (e.key === 'Delete' && _selectedRow && !_isNew) _deleteSelected();
     });
 
@@ -92,7 +100,15 @@ const AssetsTab = (() => {
   }
 
   function _loadData() {
-    return DB.query('SELECT Symbol, Description, Type, Category, Notes, Active FROM Assets WHERE Active = 1 ORDER BY Symbol');
+    return DB.query(`
+      SELECT a.Symbol, a.Description, a.Type, a.Category, a.Notes, a.Active,
+        COALESCE(l.TotalQty, 0) AS Quantity
+      FROM Assets a
+      LEFT JOIN (
+        SELECT Symbol, SUM(Quantity) AS TotalQty FROM Ledger WHERE Valid=1 GROUP BY Symbol
+      ) l ON a.Symbol = l.Symbol
+      WHERE a.Active = 1
+      ORDER BY a.Symbol`);
   }
 
   function _populateForm(row) {
