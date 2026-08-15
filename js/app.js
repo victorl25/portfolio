@@ -1,4 +1,4 @@
-const APP_VERSION = '1.0';
+const APP_VERSION = '1.1';
 
 // ── State ─────────────────────────────────────────────────────────────────
 let _lastFileHandle = null;
@@ -92,7 +92,7 @@ const App = {
       btn.addEventListener('click', () => App.Tabs.activate(id));
       document.getElementById('tab-bar').appendChild(btn);
 
-      App._tabs.push({ id, panel, btn, refresh: opts.refresh || null });
+      App._tabs.push({ id, panel, btn, refresh: opts.refresh || null, autoRefresh: opts.autoRefresh !== false });
       App.Tabs.activate(id);
     },
 
@@ -133,7 +133,7 @@ const App = {
     },
 
     refreshAll() {
-      App._tabs.forEach(t => { if (t.refresh) t.refresh(); });
+      App._tabs.forEach(t => { if (t.refresh && t.autoRefresh) t.refresh(); });
     }
   },
 
@@ -261,7 +261,11 @@ const YahooFinance = (() => {
     return _call('quote_summary', { symbol, modules: Array.isArray(module) ? module : [module] });
   }
 
-  return { getQuote, getQuoteSummary };
+  async function getChart(symbol, period1, period2, interval = '1d') {
+    return _call('get_chart', { symbol, period1, period2, interval });
+  }
+
+  return { getQuote, getQuoteSummary, getChart };
 })();
 
 // ── IndexedDB handle persistence ──────────────────────────────────────────
@@ -429,9 +433,8 @@ async function cmdExport() {
 
 async function cmdUpdatePrices() {
   const assets = DB.query(`
-    SELECT l.Symbol, a.Type
+    SELECT l.Symbol
     FROM Ledger l
-    JOIN Assets a ON l.Symbol = a.Symbol
     WHERE l.Valid = 1
     GROUP BY l.Symbol
     HAVING SUM(l.Quantity) > 0`);
@@ -458,8 +461,8 @@ async function cmdUpdatePrices() {
       let price;
       price = quote.regularMarketPrice ?? quote.regularMarketPreviousClose;
       if (price != null && !isNaN(price)) {
-        DB.run('INSERT INTO Prices (Timestamp, Symbol, Type, Price, Currency, Valid) VALUES (?,?,?,?,?,1)',
-          [_nowTs(), a.Symbol, a.Type, Math.round(price * 100) / 100, 'USD']);
+        DB.run('INSERT INTO Prices (Timestamp, Symbol, Price, Currency, Valid) VALUES (?,?,?,?,1)',
+          [_nowTs(), a.Symbol, Math.round(price * 100) / 100, 'USD']);
         updated++;
       } else {
         failures.push({ symbol: a.Symbol, reason: 'price unavailable in response' });
@@ -545,9 +548,12 @@ function _initMenus() {
   cmd('cmd-view-prices').addEventListener('click', () => { _closeMenus(); PricesTab.open(); });
   cmd('cmd-view-transactions').addEventListener('click', () => { _closeMenus(); TransactionsTab.open(); });
 
-  cmd('cmd-analyze-portfolio').addEventListener('click', () => { _closeMenus(); _stubTab('Analyze: Portfolio'); });
-  cmd('cmd-analyze-accounts').addEventListener('click', () => { _closeMenus(); _stubTab('Analyze: Accounts'); });
-  cmd('cmd-analyze-assets').addEventListener('click', () => { _closeMenus(); _stubTab('Analyze: Assets'); });
+  cmd('cmd-analyze-portfolio').addEventListener('click', () => { _closeMenus(); AnalysisTab.openPortfolio(); });
+  cmd('cmd-analyze-account').addEventListener('click', () => { _closeMenus(); AnalysisTab.openAccount(); });
+  cmd('cmd-analyze-assets').addEventListener('click', () => { _closeMenus(); AnalysisTab.openAssets(); });
+
+  cmd('cmd-report-portfolio-performance').addEventListener('click', () => { _closeMenus(); ReportsTab.open(); });
+  cmd('cmd-report-account-performance').addEventListener('click', () => { _closeMenus(); ReportsTab.openAccount(); });
 
   cmd('cmd-update-prices').addEventListener('click', () => { _closeMenus(); cmdUpdatePrices(); });
   cmd('cmd-query-db').addEventListener('click', () => { _closeMenus(); QueryTab.open(); });

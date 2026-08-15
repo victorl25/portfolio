@@ -30,6 +30,12 @@ const AssetsTab = (() => {
                 </select>
               </div>
               <div class="form-field"><label>Category</label><input class="form-control" id="ast-f-cat"></div>
+              <div class="form-field"><label>Theme</label>
+                <div class="ac-wrap">
+                  <input class="form-control" id="ast-f-theme" autocomplete="off">
+                  <div class="ac-list" id="ast-f-theme-ac"></div>
+                </div>
+              </div>
             </div>
             <div class="form-col-btns">
               <button class="btn btn-secondary" id="ast-btn-new">New</button>
@@ -63,10 +69,15 @@ const AssetsTab = (() => {
         },
         { title: 'Description', field: 'Description', widthGrow: 2, headerFilter: true, headerSortTristate: true },
         { title: 'Type',        field: 'Type',        widthGrow: 1, headerFilter: true, headerSortTristate: true },
+        { title: 'Theme',       field: 'Theme',       widthGrow: 2, headerFilter: true, headerSortTristate: true },
         { title: 'Category',    field: 'Category',    widthGrow: 2, headerFilter: true, headerSortTristate: true },
         { title: 'Notes',       field: 'Notes',       widthGrow: 2, headerFilter: true, headerSortTristate: true }
       ]
     });
+
+    _attachThemeAutocomplete(
+      panel.querySelector('#ast-f-theme'),
+      panel.querySelector('#ast-f-theme-ac'));
 
     _table.on('rowSelectionChanged', (data, rows) => {
       if (!rows.length) return;
@@ -92,7 +103,7 @@ const AssetsTab = (() => {
 
     panel.querySelector('#ast-btn-accept').addEventListener('click', _accept);
 
-    ['ast-f-symbol','ast-f-desc','ast-f-type','ast-f-cat','ast-f-notes'].forEach(id => {
+    ['ast-f-symbol','ast-f-desc','ast-f-type','ast-f-cat','ast-f-theme','ast-f-notes'].forEach(id => {
       document.getElementById(id).addEventListener('input', () => {
         document.getElementById('ast-btn-accept').disabled = false;
       });
@@ -101,7 +112,7 @@ const AssetsTab = (() => {
 
   function _loadData() {
     return DB.query(`
-      SELECT a.Symbol, a.Description, a.Type, a.Category, a.Notes, a.Active,
+      SELECT a.Symbol, a.Description, a.Type, a.Category, a.Theme, a.Notes, a.Active,
         COALESCE(l.TotalQty, 0) AS Quantity
       FROM Assets a
       LEFT JOIN (
@@ -111,11 +122,64 @@ const AssetsTab = (() => {
       ORDER BY a.Symbol`);
   }
 
+  function _attachThemeAutocomplete(inputEl, listEl) {
+    inputEl.addEventListener('input', () => {
+      const q = inputEl.value.trim();
+      if (!q) { listEl.innerHTML = ''; return; }
+      const matches = DB.query(
+        `SELECT DISTINCT Theme FROM Assets WHERE Theme LIKE ? AND Theme IS NOT NULL AND Theme <> '' ORDER BY Theme LIMIT 10`,
+        [`${q}%`]
+      );
+      listEl.innerHTML = matches.map(m =>
+        `<div class="ac-item" data-name="${_esc(m.Theme)}">${_esc(m.Theme)}</div>`
+      ).join('');
+    });
+    listEl.addEventListener('mousedown', e => {
+      const item = e.target.closest('.ac-item');
+      if (!item) return;
+      inputEl.value = item.dataset.name;
+      listEl.innerHTML = '';
+      document.getElementById('ast-btn-accept').disabled = false;
+    });
+    inputEl.addEventListener('blur', () => setTimeout(() => { listEl.innerHTML = ''; }, 150));
+    _addAcKeyboard(inputEl, listEl);
+  }
+
+  function _addAcKeyboard(inputEl, listEl) {
+    let idx = -1;
+    inputEl.addEventListener('input', () => { idx = -1; });
+    inputEl.addEventListener('keydown', e => {
+      const items = listEl.querySelectorAll('.ac-item');
+      if (!items.length) return;
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        idx = Math.min(idx + 1, items.length - 1);
+        items.forEach((it, i) => it.classList.toggle('ac-active', i === idx));
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        idx = Math.max(idx - 1, 0);
+        items.forEach((it, i) => it.classList.toggle('ac-active', i === idx));
+      } else if (e.key === 'Enter' && idx >= 0) {
+        e.preventDefault();
+        inputEl.value = items[idx].dataset.name;
+        listEl.innerHTML = '';
+        idx = -1;
+        document.getElementById('ast-btn-accept').disabled = false;
+      } else if (e.key === 'Escape') {
+        listEl.innerHTML = '';
+        idx = -1;
+      }
+    });
+  }
+
+  function _esc(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
   function _populateForm(row) {
     document.getElementById('ast-f-symbol').value = row.Symbol      || '';
     document.getElementById('ast-f-desc').value   = row.Description || '';
     document.getElementById('ast-f-type').value   = row.Type        || '';
     document.getElementById('ast-f-cat').value    = row.Category    || '';
+    document.getElementById('ast-f-theme').value  = row.Theme       || '';
     document.getElementById('ast-f-notes').value  = row.Notes       || '';
     document.getElementById('ast-btn-accept').disabled = true;
     document.getElementById('ast-f-symbol').readOnly = true;
@@ -123,7 +187,7 @@ const AssetsTab = (() => {
   }
 
   function _clearForm(readonly = true) {
-    ['ast-f-symbol','ast-f-desc','ast-f-cat','ast-f-notes'].forEach(id => { document.getElementById(id).value = ''; });
+    ['ast-f-symbol','ast-f-desc','ast-f-cat','ast-f-theme','ast-f-notes'].forEach(id => { document.getElementById(id).value = ''; });
     document.getElementById('ast-f-type').value = '';
     document.getElementById('ast-btn-accept').disabled = false;
     if (readonly) {
@@ -137,16 +201,17 @@ const AssetsTab = (() => {
     const desc   = document.getElementById('ast-f-desc').value.trim();
     const type   = document.getElementById('ast-f-type').value;
     const cat    = document.getElementById('ast-f-cat').value.trim();
+    const theme  = document.getElementById('ast-f-theme').value.trim();
     const notes  = document.getElementById('ast-f-notes').value.trim();
 
     if (!symbol) { await Dialogs.alert('Symbol is required.'); return; }
 
     if (_isNew) {
-      DB.run('INSERT OR IGNORE INTO Assets (Symbol, Description, Type, Category, Notes, Active) VALUES (?,?,?,?,?,1)',
-        [symbol, desc, type, cat, notes]);
+      DB.run('INSERT OR IGNORE INTO Assets (Symbol, Description, Type, Category, Theme, Notes, Active) VALUES (?,?,?,?,?,?,1)',
+        [symbol, desc, type, cat, theme, notes]);
     } else {
-      DB.run('UPDATE Assets SET Description=?, Type=?, Category=?, Notes=? WHERE Symbol=?',
-        [desc, type, cat, notes, _selectedRow.Symbol]);
+      DB.run('UPDATE Assets SET Description=?, Type=?, Category=?, Theme=?, Notes=? WHERE Symbol=?',
+        [desc, type, cat, theme, notes, _selectedRow.Symbol]);
     }
     document.getElementById('ast-btn-accept').disabled = true;
     _isNew = false;

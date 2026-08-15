@@ -2,3 +2,49 @@
 
 1. Report year-to-date gain/loss, query first stock close this year and save to Prices
 2. Compact Prices table tool to delete many indetmediate price quotes no longer needed
+
+
+
+Tools provided by Yahoo Finance MCP server: https://gateway.mcpservers.org/yahoo-finance/mcp
+
+  1. get_quote
+
+  Real-time (or near real-time) quote data for one or more symbols.
+  - Input: symbols (array of strings, required) — e.g. ["AAPL", "MSFT"]
+  - Returns: price, change, OHLC, volume, market cap, 52-week range, and more
+  - Used by the app for App.ensureAsset() and Tools > Update Prices
+
+  2. search
+
+  Search for instruments and related news by name, ticker, or keyword.
+  - Input: query (string, required); optional quotesCount (default 6, max 50), newsCount (default 4, max 50), lang,
+  region
+  - Returns: matching quotes (symbol, name, exchange, type) and related news articles
+  - Not currently used anywhere in the app — could be useful for a future "add asset by name" lookup
+
+  3. get_chart
+
+  Historical OHLCV price data (and optionally dividend/split events) for a symbol over a date range.
+  - Input: symbol (required), period1 (start date, required), period2 (end date, optional, defaults to now), interval
+  (default 1d; one of 1m 2m 5m 15m 30m 60m 90m 1h 1d 5d 1wk 1mo 3mo — intraday intervals only support recent ranges),
+  events (pipe-separated, e.g. div|split), includePrePost (bool, default false)
+  - Not currently used — this would be the natural tool to back a future price-history chart or the "Analyze" stub tabs
+
+  4. quote_summary
+
+  Detailed fundamental/financial data via Yahoo's quoteSummary modules.
+  - Input: symbol (required), modules (array, optional — omitting defaults to price + summaryDetail)
+  - Available modules: assetProfile, balanceSheetHistory(Quarterly), calendarEvents,
+  cashflowStatementHistory(Quarterly), defaultKeyStatistics, earnings, earningsHistory, earningsTrend, financialData,
+  fundOwnership, fundPerformance, fundProfile, incomeStatementHistory(Quarterly), indexTrend, industryTrend,
+  insiderHolders, insiderTransactions, institutionOwnership, majorDirectHolders, majorHoldersBreakdown,
+  netSharePurchaseActivity, price, quoteType, recommendationTrend, secFilings, sectorTrend, summaryProfile, topHoldings,
+  upgradeDowngradeHistory
+  - Note in the server's own description: "financial-statement modules now return little data — prefer financialData /
+  defaultKeyStatistics"
+  - Used by the app with module assetProfile for sector/industry/category enrichment on new assets
+
+  All four report "taskSupport":"forbidden" in their execution metadata (synchronous calls only, no background task
+  polling), and the server identifies itself as yahoo-finance-mcp v1.0.0.
+
+  Only get_quote and quote_summary are wired into the app today; search and get_chart are available but unused.

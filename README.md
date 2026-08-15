@@ -253,3 +253,35 @@ Individual prices can also be updated from the Prices tab using the **Update** b
 Each save writes a new file named `portfolio_YYYYMMDDHHMM.db` to your data folder. Previous files are never deleted, so your entire save history serves as an automatic backup. To restore an earlier version, use **File > Open** and select the desired file.
 
 The database is a standard SQLite file and can be opened with any SQLite tool (e.g. DB Browser for SQLite) for inspection or manual edits outside the application.
+
+---
+
+## Additional Notes
+
+The Reports tab summary strip shows three value-weighted averages, each computed with the same shape of formula but
+different inputs:
+
+Common pattern: for each average, sum a "base value" and a "current value" across the relevant assets, then:
+Avg% = (ΣCurrentValue − ΣBaseValue) / ΣBaseValue × 100
+This is a portfolio-level weighted average, not a simple average of each row's individual percentage — a $50k position
+and a $500 position both count proportionally to their size, so a big holding dominates the average the way it
+should, rather than every symbol counting equally.
+
+Total — gain/loss since acquisition:
+- Base value per asset = CostBasis = Σ(Quantity × Price paid) across that asset's Ledger transactions
+- Current value per asset = Value = Quantity × current Price
+- Summed across every asset in the report (cost basis is always known locally — no external lookup needed)
+- avgTotal = (ΣValue − ΣCostBasis) / ΣCostBasis × 100
+
+YTD / QTD — gain/loss since a baseline date:
+- Base value per asset = Quantity × BaselinePrice, where BaselinePrice is that asset's price on the first market day
+of the current year (YTD) or current quarter (QTD) — either read from a cached Prices row or fetched once via
+get_chart and cached for next time
+- Current value per asset = the same Value as above
+- Summed only across assets that have a baseline for that period — an asset with no baseline (new listing, delisted,
+failed lookup) is excluded from that specific average rather than counted as 0%
+- avgYTD/avgQTD = (Σcurrent − Σbase) / Σbase × 100
+
+So Total is comprehensive (every asset always contributes), while YTD/QTD can each silently exclude a different subset
+of assets depending on baseline availability — which is why it's possible, if a baseline lookup fails for a large
+holding, for YTD/QTD to diverge more than you'd expect from Total.

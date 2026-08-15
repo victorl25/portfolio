@@ -13,13 +13,13 @@ const SCHEMA_SQL = `
     Description TEXT,
     Type        TEXT,
     Category    TEXT,
+    Theme       TEXT,
     Notes       TEXT,
     Active      INTEGER DEFAULT 1
   );
   CREATE TABLE IF NOT EXISTS Prices (
     Timestamp TEXT    NOT NULL,
     Symbol    TEXT    NOT NULL,
-    Type      TEXT,
     Price     REAL    NOT NULL,
     Currency  TEXT    DEFAULT 'USD',
     Valid     INTEGER DEFAULT 1,

@@ -1,18 +1,22 @@
 const PortfolioTab = (() => {
   let _ctr = 0;
 
-  function open(accountId) {
+  function open(accountId, theme) {
     const id = `prt-${++_ctr}`;
+    const hasTheme = theme !== undefined && theme !== null;
     let label = 'Portfolio';
     if (accountId) {
       const acc = DB.query('SELECT Name FROM Accounts WHERE Account_ID=?', [accountId]);
-      if (acc.length) label = acc[0].Name;
+      label = acc.length ? acc[0].Name : label;
+      if (hasTheme) label += ` — ${theme || '(No Theme)'}`;
+    } else if (hasTheme) {
+      label = theme || '(No Theme)';
     }
-    App.Tabs.open(id, label, panel => _build(panel, id, accountId),
-      { closeable: !!accountId, refresh: () => _refresh(id, accountId) });
+    App.Tabs.open(id, label, panel => _build(panel, id, accountId, theme),
+      { closeable: !!accountId || hasTheme, refresh: () => _refresh(id, accountId, theme) });
   }
 
-  function _build(panel, id, accountId) {
+  function _build(panel, id, accountId, theme) {
     panel.innerHTML = `
       <div class="tab-layout">
         <div class="table-zone" id="${id}-table-wrap"></div>
@@ -27,8 +31,8 @@ const PortfolioTab = (() => {
         </div>
       </div>`;
 
-    const { rows: initRows, total: initTotal } = _loadData(accountId);
-    _renderTotal(panel, id, initTotal);
+    const { rows: initRows, total: initTotal } = _loadData(accountId, theme);
+    _renderTotal(panel, id, initTotal, initRows.length);
 
     const table = new Tabulator(`#${id}-table-wrap`, {
       data: initRows,
@@ -77,6 +81,13 @@ const PortfolioTab = (() => {
             const v = cell.getValue();
             return v != null ? v.toFixed(2) + '%' : '';
           }
+        },
+        { title: 'Action', field: 'Symbol', width: 90, hozAlign: 'center', headerSort: false,
+          formatter: () => `<button class="act-btn analyze-btn">Analyze</button>`,
+          cellClick: (e, cell) => {
+            if (!e.target.classList.contains('act-btn')) return;
+            AnalysisTab.openAssetsFor(cell.getRow().getData().Symbol);
+          }
         }
       ]
     });
@@ -90,10 +101,21 @@ const PortfolioTab = (() => {
     });
   }
 
-  function _loadData(accountId) {
+  function _loadData(accountId, theme) {
     let where = 'l.Valid = 1';
     const params = [];
     if (accountId) { where += ' AND l.Account_ID = ?'; params.push(accountId); }
+
+    let themeJoin = '';
+    if (theme !== undefined && theme !== null) {
+      themeJoin = 'JOIN Assets ta ON ta.Symbol = l.Symbol';
+      if (theme === '') {
+        where += " AND (ta.Theme IS NULL OR ta.Theme = '')";
+      } else {
+        where += ' AND ta.Theme = ?';
+        params.push(theme);
+      }
+    }
 
     const rows = DB.query(`
       SELECT l.Symbol,
@@ -103,6 +125,7 @@ const PortfolioTab = (() => {
         SUM(l.Quantity) * COALESCE(p.Price, 0) - SUM(l.Quantity * l.Price) AS GainLoss,
         SUM(l.Quantity * l.Price) AS CostBasis
       FROM Ledger l
+      ${themeJoin}
       LEFT JOIN (
         SELECT Symbol, Price FROM Prices
         WHERE Valid = 1
@@ -285,18 +308,19 @@ const PortfolioTab = (() => {
     return key + '_' + Math.abs(h).toString(36);
   }
 
-  function _renderTotal(panel, tabId, total) {
+  function _renderTotal(panel, tabId, total, assetCount) {
     const el = panel.querySelector(`#${tabId}-total`);
     if (el) el.textContent = 'Total Value: $' +
-      (total || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      (total || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) +
+      ` (${assetCount || 0})`;
   }
 
-  function _refresh(tabId, accountId) {
+  function _refresh(tabId, accountId, theme) {
     const panel = document.getElementById(`panel-${tabId}`);
     if (!panel) return;
-    const { rows, total } = _loadData(accountId);
+    const { rows, total } = _loadData(accountId, theme);
     if (panel._prtTable) panel._prtTable.replaceData(rows);
-    _renderTotal(panel, tabId, total);
+    _renderTotal(panel, tabId, total, rows.length);
   }
 
   function _fmtNum(v) {

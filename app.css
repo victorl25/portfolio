@@ -281,6 +281,129 @@ html, body {
   white-space: pre-wrap;
 }
 
+/* ── Reports Tab ────────────────────────────────────────────────────── */
+.rpt-layout {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.rpt-table-zone {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: #fff;
+}
+
+.rpt-summary {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 28px;
+  align-items: center;
+  padding: 10px 16px;
+  border-top: 2px solid #dde2ea;
+  background: #f7f9fb;
+  font-size: 14px;
+  box-sizing: border-box;
+}
+
+.rpt-summary .label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-right: 6px;
+}
+
+/* ── Analysis Tab (ported to match Money app's Report Tab styling exactly;
+     .rpt-report-layout is the outer shell — distinct from .rpt-layout above,
+     which the Performance tab's flex-based shell already owns) ──────────── */
+.rpt-report-layout {
+  padding: 28px 36px;
+  overflow-y: auto;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.rpt-header { margin-bottom: 22px; }
+
+.rpt-title {
+  font-size: 17px;
+  font-weight: 700;
+  color: #1a1a2e;
+  margin: 0 0 4px 0;
+}
+
+.rpt-subtitle {
+  font-size: 13px;
+  color: #666;
+}
+
+.rpt-table {
+  width: 560px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.rpt-table thead th {
+  background: #2c3e50;
+  color: #fff;
+  padding: 8px 14px;
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.rpt-table th.rpt-col-num,
+.rpt-table td.rpt-col-num { text-align: right; }
+
+.rpt-table td {
+  padding: 7px 14px;
+  border-bottom: 1px solid #e8e8e8;
+}
+
+.rpt-table tbody tr:nth-child(even) td { background: #f8f9fa; }
+.rpt-table tbody tr:hover td           { background: #eef2f7; }
+
+.rpt-col-name { width: 55%; }
+.rpt-col-num  { width: 22.5%; }
+
+.rpt-total-row td {
+  font-weight: 700;
+  background: #eef2f7 !important;
+  border-top: 2px solid #2c3e50;
+  border-bottom: none;
+}
+
+.rpt-empty {
+  padding: 14px;
+  color: #888;
+  font-style: italic;
+  text-align: center;
+}
+
+/* ── Asset Analysis (Analyze > Assets) — side-by-side report cards ───── */
+.aly-assets-scroll {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  height: 100%;
+  overflow: auto;
+}
+
+.aly-card {
+  flex: 0 0 auto;
+  border-right: 1px solid #dde2ea;
+}
+
+.aly-card:last-child { border-right: none; }
+
+.rpt-table.aly-indicators .rpt-col-name { width: 62%; }
+.rpt-table.aly-indicators .rpt-col-num  { width: 38%; }
+
 /* ── Form 3-column layout ───────────────────────────────────────────── */
 .form-body {
   display: flex;
@@ -412,6 +535,20 @@ a.cell-link {
 }
 
 a.cell-link:hover { text-decoration: underline; }
+
+/* ── Action buttons in table (ported from ../Money's Transactions tab) ── */
+.act-btn {
+  padding: 2px 7px;
+  font-size: 11px;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  font-weight: 500;
+  margin-right: 3px;
+}
+
+.analyze-btn { background: #3a7bd5; color: #fff; }
+.analyze-btn:hover { background: #2d65b8; }
 
 /* ── Modal dialogs ──────────────────────────────────────────────────── */
 #modal-backdrop {

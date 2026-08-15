@@ -12,6 +12,8 @@ const DB = (() => {
       'ALTER TABLE Prices RENAME COLUMN Date TO Timestamp',
       'ALTER TABLE Ledger RENAME COLUMN Date TO Timestamp',
       'ALTER TABLE Assets ADD COLUMN Notes TEXT',
+      'ALTER TABLE Assets ADD COLUMN Theme TEXT',
+      'ALTER TABLE Prices DROP COLUMN Type',
     ].forEach(sql => { try { db.run(sql); } catch {} });
   }
 

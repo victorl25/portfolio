@@ -113,8 +113,8 @@ const PricesTab = (() => {
     if (!_selectedRow) return;
     const price = parseFloat(document.getElementById('prc-f-price').value);
     if (isNaN(price) || price < 0) { await Dialogs.alert('Enter a valid price.'); return; }
-    DB.run('INSERT INTO Prices (Timestamp, Symbol, Type, Price, Currency, Valid) VALUES (?,?,?,?,?,1)',
-      [_nowTs(), _selectedRow.Symbol, null, Math.round(price * 100) / 100, _selectedRow.Currency || 'USD']);
+    DB.run('INSERT INTO Prices (Timestamp, Symbol, Price, Currency, Valid) VALUES (?,?,?,?,1)',
+      [_nowTs(), _selectedRow.Symbol, Math.round(price * 100) / 100, _selectedRow.Currency || 'USD']);
     document.getElementById('prc-btn-accept').disabled = true;
     _refresh();
     App.onDataChanged();
