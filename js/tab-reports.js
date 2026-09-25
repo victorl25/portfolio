@@ -116,7 +116,7 @@ const ReportsTab = (() => {
     const params = accountId ? [accountId] : [];
 
     const assets = DB.query(`
-      SELECT l.Symbol, SUM(l.Quantity) AS Quantity, p.Price, SUM(l.Quantity * l.Price) AS CostBasis
+      SELECT l.Symbol, SUM(l.Quantity) AS Quantity, p.Price
       FROM Ledger l
       LEFT JOIN (
         SELECT Symbol, Price FROM Prices
@@ -134,6 +134,11 @@ const ReportsTab = (() => {
       _renderSummary(panel, id, null, null, null, reportLabel);
       return;
     }
+
+    // Open-lot cost basis (FIFO) — see _computeCostBasisMap in app.js. A naive
+    // SUM(Quantity*Price) here would incorrectly fold the realized gain/loss of any prior
+    // fully-closed round trip into the cost basis of shares bought afterward.
+    const costMap = _computeCostBasisMap('', where, params);
 
     const { yearStart, quarterStart } = _periodStarts();
 
@@ -160,7 +165,7 @@ const ReportsTab = (() => {
 
       const price = a.Price || 0;
       const value = a.Quantity * price;
-      const costBasis = a.CostBasis || 0;
+      const costBasis = costMap.get(a.Symbol)?.costBasis ?? 0;
 
       const pctYTD   = baseYTD ? (price - baseYTD.price) / baseYTD.price * 100 : null;
       const pctQTD   = baseQTD ? (price - baseQTD.price) / baseQTD.price * 100 : null;

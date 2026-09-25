@@ -106,8 +106,9 @@ const PortfolioTab = (() => {
     const params = [];
     if (accountId) { where += ' AND l.Account_ID = ?'; params.push(accountId); }
 
+    const isThemeFiltered = theme !== undefined && theme !== null;
     let themeJoin = '';
-    if (theme !== undefined && theme !== null) {
+    if (isThemeFiltered) {
       themeJoin = 'JOIN Assets ta ON ta.Symbol = l.Symbol';
       if (theme === '') {
         where += " AND (ta.Theme IS NULL OR ta.Theme = '')";
@@ -121,9 +122,7 @@ const PortfolioTab = (() => {
       SELECT l.Symbol,
         SUM(l.Quantity) AS Quantity,
         p.Price,
-        SUM(l.Quantity) * COALESCE(p.Price, 0) AS Value,
-        SUM(l.Quantity) * COALESCE(p.Price, 0) - SUM(l.Quantity * l.Price) AS GainLoss,
-        SUM(l.Quantity * l.Price) AS CostBasis
+        SUM(l.Quantity) * COALESCE(p.Price, 0) AS Value
       FROM Ledger l
       ${themeJoin}
       LEFT JOIN (
@@ -136,16 +135,30 @@ const PortfolioTab = (() => {
       GROUP BY l.Symbol
       HAVING SUM(l.Quantity) > 0`, params);
 
+    // Open-lot cost basis (FIFO) — computed separately from raw transactions rather than a
+    // naive SUM(Quantity*Price) aggregate, which would incorrectly fold the realized gain/loss
+    // of any prior fully-closed round trip into the cost basis of shares bought afterward.
+    const costMap = _computeCostBasisMap(themeJoin, where, params);
+    rows.forEach(r => { r.CostBasis = costMap.get(r.Symbol)?.costBasis ?? 0; });
+
     const assetsTotal = rows.reduce((s, r) => s + (r.Value || 0), 0);
 
-    const cashRes = accountId
-      ? DB.query('SELECT COALESCE(SUM(Cash), 0) AS TotalCash FROM Accounts WHERE Account_ID = ? AND Active = 1', [accountId])
-      : DB.query('SELECT COALESCE(SUM(Cash), 0) AS TotalCash FROM Accounts WHERE Active = 1');
-    const cash  = cashRes[0]?.TotalCash || 0;
+    // Cash has no Theme of its own — folding the account's/portfolio's full cash balance into
+    // the denominator here would understate %Portfolio for every row once the view is narrowed
+    // to a single Theme (rows only ever sum to that Theme's assets). Only include cash for the
+    // unfiltered view, where "total" genuinely means everything in scope (assets + cash).
+    let cash = 0;
+    if (!isThemeFiltered) {
+      const cashRes = accountId
+        ? DB.query('SELECT COALESCE(SUM(Cash), 0) AS TotalCash FROM Accounts WHERE Account_ID = ? AND Active = 1', [accountId])
+        : DB.query('SELECT COALESCE(SUM(Cash), 0) AS TotalCash FROM Accounts WHERE Active = 1');
+      cash = cashRes[0]?.TotalCash || 0;
+    }
     const total = assetsTotal + cash;
 
     rows.forEach(r => {
       r.Percent      = total > 0 ? (r.Value || 0) / total * 100 : 0;
+      r.GainLoss     = (r.Value || 0) - r.CostBasis;
       r.GainLossPct  = r.CostBasis ? r.GainLoss / r.CostBasis * 100 : null;
     });
     return { rows, total };

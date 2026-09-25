@@ -518,6 +518,55 @@ function _nowTs() {
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
+// Computes each symbol's remaining open-lot cost basis via FIFO matching of buys/sells,
+// scoped by the same Ledger WHERE (and optional JOIN, e.g. for Theme filtering) the caller
+// used for its aggregate Quantity/Value query. Naively summing Quantity*Price across ALL
+// ledger rows for a symbol (buys positive, sells negative) is NOT the open position's cost
+// basis whenever a prior round-trip (buy then fully sell) closed at a different price than
+// it opened at — that closed lot's net cash flow equals -RealizedGain, which then bleeds into
+// the "cost basis" of totally unrelated shares bought later. FIFO matching removes closed lots
+// (and their realized gain/loss) from the calculation entirely, leaving only the cost of shares
+// still actually held. Returns a Map<Symbol, { quantity, costBasis }>.
+function _computeCostBasisMap(joinSql, whereSql, params) {
+  const txns = DB.query(`
+    SELECT l.Symbol, l.Quantity, l.Price
+    FROM Ledger l
+    ${joinSql || ''}
+    WHERE ${whereSql}
+    ORDER BY l.Symbol ASC, l.Timestamp ASC`, params);
+
+  const map = new Map();
+  let curSymbol = null, lots = [];
+  const EPS = 1e-9;
+
+  const flush = () => {
+    if (curSymbol == null) return;
+    const quantity  = lots.reduce((s, l) => s + l.qty, 0);
+    const costBasis = lots.reduce((s, l) => s + l.qty * l.price, 0);
+    map.set(curSymbol, { quantity, costBasis });
+  };
+
+  for (const t of txns) {
+    if (t.Symbol !== curSymbol) { flush(); curSymbol = t.Symbol; lots = []; }
+    const qty = t.Quantity;
+    if (qty > 0) {
+      lots.push({ qty, price: t.Price });
+    } else if (qty < 0) {
+      let sellQty = -qty;
+      while (sellQty > EPS && lots.length) {
+        const lot = lots[0];
+        const consume = Math.min(lot.qty, sellQty);
+        lot.qty -= consume;
+        sellQty -= consume;
+        if (lot.qty <= EPS) lots.shift();
+      }
+    }
+  }
+  flush();
+
+  return map;
+}
+
 // ── Menu wiring ───────────────────────────────────────────────────────────
 function _initMenus() {
   // Toggle dropdowns
