@@ -452,29 +452,62 @@ async function cmdUpdatePrices() {
 
   let updated = 0;
   const failures = [];
+  const DELAY_MS = 100;
+  const RATE_LIMIT_WAIT_MS = 1000;
+  const MAX_ATTEMPTS = 15;
+  const isRateLimited = v => /too many requests|\b429\b/i.test(String(v ?? ''));
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  let abortedOn = null;
 
-  for (let i = 0; i < assets.length; i++) {
+  for (let i = 0; i < assets.length && !abortedOn; i++) {
     const a = assets[i];
     c.querySelector('#upd-msg').textContent = `Updating ${i + 1} / ${assets.length}: ${a.Symbol}…`;
-    try {
-      const quote = await YahooFinance.getQuote(a.Symbol);
-      let price;
-      price = quote.regularMarketPrice ?? quote.regularMarketPreviousClose;
-      if (price != null && !isNaN(price)) {
-        DB.run('INSERT INTO Prices (Timestamp, Symbol, Price, Currency, Valid) VALUES (?,?,?,?,1)',
-          [_nowTs(), a.Symbol, Math.round(price * 100) / 100, 'USD']);
-        updated++;
-      } else {
-        failures.push({ symbol: a.Symbol, reason: 'price unavailable in response' });
+    c.querySelector('#upd-detail').textContent = '';
+
+    for (let attempt = 1; ; attempt++) {
+      let quote, error;
+      try { quote = await YahooFinance.getQuote(a.Symbol); }
+      catch (e) { error = e; }
+
+      const limited = error ? isRateLimited(error.message) : typeof quote === 'string' && isRateLimited(quote);
+      if (limited) {
+        if (attempt >= MAX_ATTEMPTS) { abortedOn = a.Symbol; break; }
+        c.querySelector('#upd-detail').textContent =
+          `Too Many Requests — waiting 1 s, retrying ${a.Symbol} (attempt ${attempt + 1} of ${MAX_ATTEMPTS})…`;
+        await sleep(RATE_LIMIT_WAIT_MS);
+        continue;
       }
-    } catch (e) {
-      failures.push({ symbol: a.Symbol, reason: e.message });
+
+      if (error) {
+        failures.push({ symbol: a.Symbol, reason: error.message });
+      } else {
+        const price = quote?.regularMarketPrice ?? quote?.regularMarketPreviousClose;
+        if (price != null && !isNaN(price)) {
+          DB.run('INSERT INTO Prices (Timestamp, Symbol, Price, Currency, Valid) VALUES (?,?,?,?,1)',
+            [_nowTs(), a.Symbol, Math.round(price * 100) / 100, 'USD']);
+          updated++;
+        } else {
+          failures.push({ symbol: a.Symbol, reason: 'price unavailable in response' });
+        }
+      }
+      break;
     }
-    await new Promise(r => setTimeout(r, 100));
+    if (!abortedOn) await sleep(DELAY_MS);
   }
 
   Dialogs.close();
   App.onDataChanged();
+
+  if (abortedOn) {
+    const remaining = assets.length - updated - failures.length;
+    failures.push({ symbol: abortedOn, reason: `Too Many Requests on all ${MAX_ATTEMPTS} attempts — update stopped` });
+    await _showResultDialog(
+      `Price update terminated: the Yahoo Finance server kept returning "Too Many Requests" for ${abortedOn}. ` +
+      `${updated} price(s) were updated before stopping; ${remaining} symbol(s) were not updated. Try again later.`,
+      failures, 'Update Prices');
+    return;
+  }
+
   await _showResultDialog(
     `Prices updated: ${updated} succeeded, ${failures.length} failed.`,
     failures, 'Update Prices');
