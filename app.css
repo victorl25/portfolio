@@ -745,3 +745,22 @@ a.cell-link:hover { text-decoration: underline; }
   border: 1px solid #c8d0dc;
   border-radius: 3px;
 }
+
+/* ── Version 2 additions ─────────────────────────────────────────────── */
+#tab-empty {
+  padding: 40px;
+  color: #999;
+  font-size: 15px;
+}
+.sel-pair { display: flex; gap: 4px; }
+.sel-pair select { flex: 1; min-width: 0; }
+.form-checks { display: flex; gap: 18px; align-items: center; }
+.form-checks label { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #444; }
+.form-err { color: #c0392b; font-size: 12px; min-height: 14px; }
+.note-list { max-height: 320px; overflow-y: auto; }
+.note-item { padding: 6px 0; border-bottom: 1px solid #eee; font-size: 13px; color: #333; white-space: pre-wrap; }
+.note-item:last-child { border-bottom: none; }
+.note-ts { font-size: 11px; color: #888; margin-bottom: 2px; }
+.imp-summary { border-collapse: collapse; font-size: 13px; margin-bottom: 4px; }
+.imp-summary td { padding: 3px 10px 3px 0; }
+.imp-summary td:last-child { text-align: right; font-weight: 600; }

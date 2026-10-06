@@ -4,7 +4,7 @@ const AnalysisTab = (() => {
   function openPortfolio() {
     const id = `aly-${++_ctr}`;
     App.Tabs.open(id, 'Portfolio Analysis', panel => _build(panel, id),
-      { closeable: true, refresh: () => _refresh(id) });
+      { refresh: () => _refresh(id) });
   }
 
   async function openAccount() {
@@ -15,7 +15,7 @@ const AnalysisTab = (() => {
 
     const id = `aly-${++_ctr}`;
     App.Tabs.open(id, `Portfolio Analysis — ${accountName}`, panel => _build(panel, id, accountId),
-      { closeable: true, refresh: () => _refresh(id, accountId) });
+      { refresh: () => _refresh(id, accountId) });
   }
 
   async function _selectAccountDialog() {
@@ -117,25 +117,21 @@ const AnalysisTab = (() => {
   }
 
   function _loadData(accountId) {
-    const where  = accountId ? 'l.Valid = 1 AND l.Account_ID = ?' : 'l.Valid = 1';
+    const where  = accountId ? 'l.Active = 1 AND l.Quantity <> 0 AND l.Account_ID = ?' : 'l.Active = 1 AND l.Quantity <> 0';
     const params = accountId ? [accountId] : [];
 
+    // Assets missing from the Assets table (e.g. a failed lookup) are grouped under "(No Theme)"
     const assets = DB.query(`
       SELECT a.Theme,
         l.Symbol,
         SUM(l.Quantity) AS Quantity,
         p.Price
       FROM Ledger l
-      JOIN Assets a ON a.Symbol = l.Symbol
-      LEFT JOIN (
-        SELECT Symbol, Price FROM Prices
-        WHERE Valid = 1
-        GROUP BY Symbol
-        HAVING Timestamp = MAX(Timestamp)
-      ) p ON l.Symbol = p.Symbol
+      LEFT JOIN Assets a ON a.Symbol = l.Symbol
+      LEFT JOIN v_latest_price p ON l.Symbol = p.Symbol
       WHERE ${where}
       GROUP BY l.Symbol
-      HAVING SUM(l.Quantity) > 0`, params);
+      HAVING SUM(l.Quantity) <> 0`, params);
 
     const byTheme = new Map();
     for (const a of assets) {
@@ -185,7 +181,7 @@ const AnalysisTab = (() => {
       ? `Assets: ${symbols.join(', ')}`
       : `Assets: ${symbols.slice(0, 3).join(', ')}… (${symbols.length})`;
     App.Tabs.open(id, label, panel => _buildAssets(panel, id, symbols),
-      { closeable: true, autoRefresh: false, refresh: () => _refreshAssets(id) });
+      { autoRefresh: false, refresh: () => _refreshAssets(id) });
   }
 
   function _buildAssets(panel, id, symbols) {

@@ -16,11 +16,12 @@
     <div id="menu-bar">
       <div class="menu-item" id="menu-file">File
         <div class="dropdown">
-          <div class="dropdown-item" id="cmd-new">New</div>
-          <div class="dropdown-item" id="cmd-open">Open...</div>
-          <div class="dropdown-item" id="cmd-import">Import...</div>
-          <div class="dropdown-item" id="cmd-export">Export...</div>
-          <div class="dropdown-item" id="cmd-save">Save...</div>
+          <div class="dropdown-item" id="cmd-new">New portfolio</div>
+          <div class="dropdown-item" id="cmd-open">Open portfolio...</div>
+          <div class="dropdown-item" id="cmd-import-holdings">Import holdings...</div>
+          <div class="dropdown-item" id="cmd-import-transactions">Import transactions...</div>
+          <div class="dropdown-item" id="cmd-export">Export portfolio...</div>
+          <div class="dropdown-item" id="cmd-save">Save portfolio...</div>
         </div>
       </div>
       <div class="menu-item" id="menu-view">View
@@ -30,6 +31,9 @@
           <div class="dropdown-item" id="cmd-view-assets">Assets</div>
           <div class="dropdown-item" id="cmd-view-prices">Prices</div>
           <div class="dropdown-item" id="cmd-view-transactions">Transactions</div>
+          <div class="dropdown-item" id="cmd-view-ledger">Ledger</div>
+          <div class="dropdown-item" id="cmd-view-options">Options</div>
+          <div class="dropdown-item" id="cmd-view-rules">Rules</div>
         </div>
       </div>
       <div class="menu-item" id="menu-analyze">Analyze
@@ -80,6 +84,7 @@
   <script src="lib/tabulator.min.js"></script>
   <script src="js/schema.js"></script>
   <script src="js/db.js"></script>
+  <script src="js/engine.js"></script>
   <script src="js/dialogs.js"></script>
   <script src="js/import.js"></script>
   <script src="js/tab-portfolio.js"></script>
@@ -87,6 +92,9 @@
   <script src="js/tab-assets.js"></script>
   <script src="js/tab-prices.js"></script>
   <script src="js/tab-transactions.js"></script>
+  <script src="js/tab-ledger.js"></script>
+  <script src="js/tab-options.js"></script>
+  <script src="js/tab-rules.js"></script>
   <script src="js/tab-query.js"></script>
   <script src="js/tab-reports.js"></script>
   <script src="js/tab-analysis.js"></script>

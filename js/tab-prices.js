@@ -4,7 +4,7 @@ const PricesTab = (() => {
   let _selectedRow = null;
 
   function open() {
-    App.Tabs.open(TAB_ID, 'Prices', panel => _build(panel), { refresh: _refresh });
+    App.Tabs.open(TAB_ID, 'Prices', panel => _build(panel), { refresh: _refresh, onClose: () => { _table = null; _selectedRow = null; } });
   }
 
   function _build(panel) {
@@ -54,7 +54,7 @@ const PricesTab = (() => {
         { title: 'Description', field: 'Description', headerFilter: true, headerSortTristate: true },
         { title: 'Price', field: 'Price', headerSortTristate: true,
           formatter: 'money', formatterParams: { decimal: '.', thousand: ',', symbol: '$', precision: 2 } },
-        { title: 'Timestamp', field: 'Timestamp', headerSortTristate: true }
+        { title: 'Date', field: 'Date', headerSortTristate: true }
       ]
     });
 
@@ -79,13 +79,11 @@ const PricesTab = (() => {
 
   function _loadData() {
     return DB.query(`
-      SELECT p.Symbol, a.Description, p.Price, p.Timestamp, p.Currency
-      FROM Prices p
-      JOIN Assets a ON p.Symbol = a.Symbol
-      WHERE p.Valid = 1
-      GROUP BY p.Symbol
-      HAVING p.Timestamp = MAX(p.Timestamp)
-      ORDER BY p.Symbol`);
+      SELECT lp.Symbol, a.Description, lp.Price, lp.Date, p.Currency
+      FROM v_latest_price lp
+      JOIN Prices p ON p.Symbol = lp.Symbol AND p.Date = lp.Date
+      LEFT JOIN Assets a ON lp.Symbol = a.Symbol
+      ORDER BY lp.Symbol`);
   }
 
   async function _update() {
@@ -113,8 +111,7 @@ const PricesTab = (() => {
     if (!_selectedRow) return;
     const price = parseFloat(document.getElementById('prc-f-price').value);
     if (isNaN(price) || price < 0) { await Dialogs.alert('Enter a valid price.'); return; }
-    DB.run('INSERT INTO Prices (Timestamp, Symbol, Price, Currency, Valid) VALUES (?,?,?,?,1)',
-      [_nowTs(), _selectedRow.Symbol, Math.round(price * 100) / 100, _selectedRow.Currency || 'USD']);
+    _upsertPrice(_selectedRow.Symbol, _todayStr(), price, _selectedRow.Currency || 'USD');
     document.getElementById('prc-btn-accept').disabled = true;
     _refresh();
     App.onDataChanged();

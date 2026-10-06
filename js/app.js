@@ -1,4 +1,4 @@
-const APP_VERSION = '1.1';
+const APP_VERSION = '2.0';
 
 // ── State ─────────────────────────────────────────────────────────────────
 let _lastFileHandle = null;
@@ -80,20 +80,21 @@ const App = {
       lbl.textContent = label;
       btn.appendChild(lbl);
 
-      if (opts.closeable) {
-        const x = document.createElement('span');
-        x.className = 'tab-close';
-        x.textContent = '×';
-        x.dataset.closeTab = id;
-        x.addEventListener('click', e => { e.stopPropagation(); App.Tabs.close(id); });
-        btn.appendChild(x);
-      }
+      // All views are closeable
+      const x = document.createElement('span');
+      x.className = 'tab-close';
+      x.textContent = '×';
+      x.dataset.closeTab = id;
+      x.addEventListener('click', e => { e.stopPropagation(); App.Tabs.close(id); });
+      btn.appendChild(x);
 
       btn.addEventListener('click', () => App.Tabs.activate(id));
       document.getElementById('tab-bar').appendChild(btn);
 
-      App._tabs.push({ id, panel, btn, refresh: opts.refresh || null, autoRefresh: opts.autoRefresh !== false });
+      App._tabs.push({ id, panel, btn, refresh: opts.refresh || null, autoRefresh: opts.autoRefresh !== false,
+                       onClose: opts.onClose || null });
       App.Tabs.activate(id);
+      App.Tabs._renderEmpty();
     },
 
     close(id) {
@@ -103,19 +104,34 @@ const App = {
       t.btn.remove();
       t.panel.remove();
       App._tabs.splice(idx, 1);
+      if (t.onClose) t.onClose();
       if (App._activeId === id) {
         const next = App._tabs[Math.min(idx, App._tabs.length - 1)];
         if (next) App.Tabs.activate(next.id); else App._activeId = null;
       }
+      App.Tabs._renderEmpty();
     },
 
     closeAll() {
       [...App._tabs].forEach(t => {
         t.btn.remove();
         t.panel.remove();
+        if (t.onClose) t.onClose();
       });
       App._tabs = [];
       App._activeId = null;
+      App.Tabs._renderEmpty();
+    },
+
+    // Placeholder shown in the content area when no view is open
+    _renderEmpty() {
+      let el = document.getElementById('tab-empty');
+      if (App._tabs.length) { if (el) el.remove(); return; }
+      if (el) return;
+      el = document.createElement('div');
+      el.id = 'tab-empty';
+      el.textContent = 'No open views. Use the View menu to open one.';
+      document.getElementById('tab-content').appendChild(el);
     },
 
     activate(id) {
@@ -331,7 +347,13 @@ async function cmdOpen() {
   } catch { return; }
   const file  = await fh.getFile();
   const bytes = new Uint8Array(await file.arrayBuffer());
-  DB.loadFromBytes(bytes);
+  try {
+    DB.loadFromBytes(bytes);
+  } catch (e) {
+    // Unsupported schema version or not a database: keep the current database open
+    await Dialogs.alertHtml(`<p>${_esc(e.message)}</p>`, `Cannot open ${file.name}`);
+    return;
+  }
   _lastFileHandle = fh;
   _dbFilename     = file.name;
   _lastPrefix     = _extractPrefix(file.name);
@@ -372,22 +394,15 @@ async function cmdExport() {
   if (!DB.isLoaded()) { await Dialogs.alert('No database loaded.'); return; }
 
   const rows = DB.query(`
-    SELECT l.Symbol,
-      SUM(l.Quantity) AS Quantity,
-      SUM(l.Quantity) * COALESCE(p.Price, 0) AS Value,
-      a.Description, a.Type, a.Category, a.Notes
-    FROM Ledger l
-    LEFT JOIN (
-      SELECT Symbol, Price FROM Prices
-      WHERE Valid = 1
-      GROUP BY Symbol
-      HAVING Timestamp = MAX(Timestamp)
-    ) p ON l.Symbol = p.Symbol
-    LEFT JOIN Assets a ON l.Symbol = a.Symbol
-    WHERE l.Valid = 1
-    GROUP BY l.Symbol
-    HAVING SUM(l.Quantity) > 0
-    ORDER BY l.Symbol`);
+    SELECT h.Symbol, h.Quantity,
+      h.Quantity * COALESCE(p.Price, 0) AS Value,
+      a.Description, a.Type, a.Category,
+      (SELECT n.Note FROM Notes n WHERE n.Symbol = h.Symbol ORDER BY n.Timestamp DESC, n.Note_ID DESC LIMIT 1) AS Notes
+    FROM v_holdings h
+    LEFT JOIN v_latest_price p ON h.Symbol = p.Symbol
+    LEFT JOIN Assets a ON h.Symbol = a.Symbol
+    WHERE h.Quantity > 0
+    ORDER BY h.Symbol`);
 
   if (!rows.length) { await Dialogs.alert('No holdings to export.'); return; }
 
@@ -415,14 +430,11 @@ async function cmdExport() {
   }
   const csv = lines.join('\r\n') + '\r\n';
 
-  const d = new Date(), p = n => String(n).padStart(2, '0');
-  const suggestedName = `portfolio_${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}.csv`;
-
   try {
     const fh = await window.showSaveFilePicker({
       id: 'portfolio-export',
       startIn: _lastFileHandle || undefined,
-      suggestedName,
+      suggestedName: `portfolio_${_todayStr()}.csv`,
       types: [{ description: 'CSV file', accept: { 'text/csv': ['.csv'] } }]
     });
     const writable = await fh.createWritable();
@@ -431,15 +443,13 @@ async function cmdExport() {
   } catch { return; }
 }
 
+// Fetches daily closing prices for all held assets (active Ledger entries with quantity ≠ 0),
+// from today − 1 year or from the last stored price date, whichever is later. The last stored
+// date is fetched again so an intraday price recorded earlier is replaced by the final close.
 async function cmdUpdatePrices() {
-  const assets = DB.query(`
-    SELECT l.Symbol
-    FROM Ledger l
-    WHERE l.Valid = 1
-    GROUP BY l.Symbol
-    HAVING SUM(l.Quantity) > 0`);
+  const assets = DB.query('SELECT Symbol FROM v_holdings ORDER BY Symbol');
 
-  if (!assets.length) { await Dialogs.alert('No assets with positive holdings.'); return; }
+  if (!assets.length) { await Dialogs.alert('No assets with holdings.'); return; }
 
   const c = Dialogs.custom(`
     <div class="dlg dlg-wide">
@@ -450,26 +460,30 @@ async function cmdUpdatePrices() {
       </div>
     </div>`);
 
-  let updated = 0;
+  let updated = 0, closes = 0;
   const failures = [];
   const DELAY_MS = 100;
   const RATE_LIMIT_WAIT_MS = 1000;
   const MAX_ATTEMPTS = 15;
   const isRateLimited = v => /too many requests|\b429\b/i.test(String(v ?? ''));
   const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const yearAgo  = _addDaysStr(_todayStr(), -365);
+  const tomorrow = _addDaysStr(_todayStr(), 1);
   let abortedOn = null;
 
   for (let i = 0; i < assets.length && !abortedOn; i++) {
     const a = assets[i];
     c.querySelector('#upd-msg').textContent = `Updating ${i + 1} / ${assets.length}: ${a.Symbol}…`;
     c.querySelector('#upd-detail').textContent = '';
+    const last  = DB.query('SELECT MAX(Date) AS D FROM Prices WHERE Symbol=? AND Valid=1', [a.Symbol])[0]?.D;
+    const start = last && last > yearAgo ? last : yearAgo;
 
     for (let attempt = 1; ; attempt++) {
-      let quote, error;
-      try { quote = await YahooFinance.getQuote(a.Symbol); }
+      let chart, error;
+      try { chart = await YahooFinance.getChart(a.Symbol, start, tomorrow, '1d'); }
       catch (e) { error = e; }
 
-      const limited = error ? isRateLimited(error.message) : typeof quote === 'string' && isRateLimited(quote);
+      const limited = error ? isRateLimited(error.message) : typeof chart === 'string' && isRateLimited(chart);
       if (limited) {
         if (attempt >= MAX_ATTEMPTS) { abortedOn = a.Symbol; break; }
         c.querySelector('#upd-detail').textContent =
@@ -480,14 +494,16 @@ async function cmdUpdatePrices() {
 
       if (error) {
         failures.push({ symbol: a.Symbol, reason: error.message });
+      } else if (typeof chart === 'string') {
+        failures.push({ symbol: a.Symbol, reason: chart.slice(0, 200) });
       } else {
-        const price = quote?.regularMarketPrice ?? quote?.regularMarketPreviousClose;
-        if (price != null && !isNaN(price)) {
-          DB.run('INSERT INTO Prices (Timestamp, Symbol, Price, Currency, Valid) VALUES (?,?,?,?,1)',
-            [_nowTs(), a.Symbol, Math.round(price * 100) / 100, 'USD']);
+        const quotes = (chart?.quotes || []).filter(q => q.close != null && q.date);
+        if (quotes.length) {
+          for (const q of quotes) _upsertPrice(a.Symbol, _isoToDate(q.date), q.close);
+          closes += quotes.length;
           updated++;
         } else {
-          failures.push({ symbol: a.Symbol, reason: 'price unavailable in response' });
+          failures.push({ symbol: a.Symbol, reason: 'no price data in response' });
         }
       }
       break;
@@ -503,14 +519,21 @@ async function cmdUpdatePrices() {
     failures.push({ symbol: abortedOn, reason: `Too Many Requests on all ${MAX_ATTEMPTS} attempts — update stopped` });
     await _showResultDialog(
       `Price update terminated: the Yahoo Finance server kept returning "Too Many Requests" for ${abortedOn}. ` +
-      `${updated} price(s) were updated before stopping; ${remaining} symbol(s) were not updated. Try again later.`,
+      `${updated} symbol(s) were updated before stopping; ${remaining} symbol(s) were not updated. Try again later.`,
       failures, 'Update Prices');
     return;
   }
 
   await _showResultDialog(
-    `Prices updated: ${updated} succeeded, ${failures.length} failed.`,
+    `Prices updated: ${updated} symbol(s) succeeded (${closes} daily closes), ${failures.length} failed.`,
     failures, 'Update Prices');
+}
+
+// Inserts or replaces the daily price of a symbol (Prices is unique per Symbol + Date).
+function _upsertPrice(symbol, date, price, currency) {
+  DB.run(`INSERT INTO Prices (Date, Symbol, Price, Currency, Valid) VALUES (?,?,?,?,1)
+          ON CONFLICT(Symbol, Date) DO UPDATE SET Price=excluded.Price, Currency=excluded.Currency, Valid=1`,
+    [date, symbol, Math.round(price * 100) / 100, currency || 'USD']);
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -551,53 +574,24 @@ function _nowTs() {
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-// Computes each symbol's remaining open-lot cost basis via FIFO matching of buys/sells,
-// scoped by the same Ledger WHERE (and optional JOIN, e.g. for Theme filtering) the caller
-// used for its aggregate Quantity/Value query. Naively summing Quantity*Price across ALL
-// ledger rows for a symbol (buys positive, sells negative) is NOT the open position's cost
-// basis whenever a prior round-trip (buy then fully sell) closed at a different price than
-// it opened at — that closed lot's net cash flow equals -RealizedGain, which then bleeds into
-// the "cost basis" of totally unrelated shares bought later. FIFO matching removes closed lots
-// (and their realized gain/loss) from the calculation entirely, leaving only the cost of shares
-// still actually held. Returns a Map<Symbol, { quantity, costBasis }>.
-function _computeCostBasisMap(joinSql, whereSql, params) {
-  const txns = DB.query(`
-    SELECT l.Symbol, l.Quantity, l.Price
-    FROM Ledger l
-    ${joinSql || ''}
-    WHERE ${whereSql}
-    ORDER BY l.Symbol ASC, l.Timestamp ASC`, params);
+function _todayStr() {
+  const d = new Date(), p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`;
+}
 
-  const map = new Map();
-  let curSymbol = null, lots = [];
-  const EPS = 1e-9;
+function _addDaysStr(dateStr, days) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d + days));
+  const p = n => String(n).padStart(2, '0');
+  return `${dt.getUTCFullYear()}-${p(dt.getUTCMonth() + 1)}-${p(dt.getUTCDate())}`;
+}
 
-  const flush = () => {
-    if (curSymbol == null) return;
-    const quantity  = lots.reduce((s, l) => s + l.qty, 0);
-    const costBasis = lots.reduce((s, l) => s + l.qty * l.price, 0);
-    map.set(curSymbol, { quantity, costBasis });
-  };
-
-  for (const t of txns) {
-    if (t.Symbol !== curSymbol) { flush(); curSymbol = t.Symbol; lots = []; }
-    const qty = t.Quantity;
-    if (qty > 0) {
-      lots.push({ qty, price: t.Price });
-    } else if (qty < 0) {
-      let sellQty = -qty;
-      while (sellQty > EPS && lots.length) {
-        const lot = lots[0];
-        const consume = Math.min(lot.qty, sellQty);
-        lot.qty -= consume;
-        sellQty -= consume;
-        if (lot.qty <= EPS) lots.shift();
-      }
-    }
-  }
-  flush();
-
-  return map;
+// Trading date (YYYY-MM-DD) of a get_chart daily candle. Candles are stamped either at
+// midnight UTC or at the US market open (13:30/14:30 UTC); the UTC calendar date is the
+// trading date in both cases, whereas a local-time conversion could shift it a day back.
+function _isoToDate(iso) {
+  const s = typeof iso === 'string' ? iso : new Date(iso).toISOString();
+  return s.slice(0, 10);
 }
 
 // ── Menu wiring ───────────────────────────────────────────────────────────
@@ -620,7 +614,8 @@ function _initMenus() {
 
   cmd('cmd-new').addEventListener('click', () => { _closeMenus(); cmdNew(); });
   cmd('cmd-open').addEventListener('click', () => { _closeMenus(); cmdOpen(); });
-  cmd('cmd-import').addEventListener('click', () => { _closeMenus(); Import.run(); });
+  cmd('cmd-import-holdings').addEventListener('click', () => { _closeMenus(); Import.runHoldings(); });
+  cmd('cmd-import-transactions').addEventListener('click', () => { _closeMenus(); Import.runTransactions(); });
   cmd('cmd-export').addEventListener('click', () => { _closeMenus(); cmdExport(); });
   cmd('cmd-save').addEventListener('click', () => { _closeMenus(); cmdSave(); });
 
@@ -629,6 +624,9 @@ function _initMenus() {
   cmd('cmd-view-assets').addEventListener('click', () => { _closeMenus(); AssetsTab.open(); });
   cmd('cmd-view-prices').addEventListener('click', () => { _closeMenus(); PricesTab.open(); });
   cmd('cmd-view-transactions').addEventListener('click', () => { _closeMenus(); TransactionsTab.open(); });
+  cmd('cmd-view-ledger').addEventListener('click', () => { _closeMenus(); LedgerTab.open(); });
+  cmd('cmd-view-options').addEventListener('click', () => { _closeMenus(); OptionsTab.open(); });
+  cmd('cmd-view-rules').addEventListener('click', () => { _closeMenus(); RulesTab.open(); });
 
   cmd('cmd-analyze-portfolio').addEventListener('click', () => { _closeMenus(); AnalysisTab.openPortfolio(); });
   cmd('cmd-analyze-account').addEventListener('click', () => { _closeMenus(); AnalysisTab.openAccount(); });
@@ -646,14 +644,6 @@ function _initMenus() {
 
 function _closeMenus() {
   document.querySelectorAll('.menu-item.open').forEach(m => m.classList.remove('open'));
-}
-
-let _stubCtr = 0;
-function _stubTab(label) {
-  const id = `stub-${++_stubCtr}`;
-  App.Tabs.open(id, label, panel => {
-    panel.innerHTML = `<div style="padding:40px;color:#999;font-size:15px;">Coming soon</div>`;
-  }, { closeable: true });
 }
 
 // ── Startup ───────────────────────────────────────────────────────────────
@@ -682,6 +672,7 @@ async function _startup() {
   _lastFileHandle = await _idbGet('dbFile');
 
   let loaded = false;
+  let refusal = null;   // message shown after startup when the auto-loaded file is refused
 
   if (dataDir && dbFile) {
     const url = `${_dataDirUrl}/${dbFile}`;
@@ -704,6 +695,10 @@ async function _startup() {
       }
     } catch (e) {
       console.warn('Failed to load DB from URL:', e.message);
+      if (e instanceof DB.VersionError) {
+        refusal = { title: `Cannot open ${dbFile}`,
+                    html: `<p>${_esc(e.message)}</p><p>A new empty database has been created instead.</p>` };
+      }
     }
   }
 
@@ -715,6 +710,7 @@ async function _startup() {
   DB.resetChangeCount();
   _renderStatus();
   _resetTabs();
+  if (refusal) await Dialogs.alertHtml(refusal.html, refusal.title);
 }
 
 initSqlJs({ locateFile: f => `lib/${f}` }).then(SqlLib => {

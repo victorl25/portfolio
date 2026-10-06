@@ -5,7 +5,8 @@ const AssetsTab = (() => {
   let _isNew = false;
 
   function open() {
-    App.Tabs.open(TAB_ID, 'Assets', panel => _build(panel), { refresh: _refresh });
+    App.Tabs.open(TAB_ID, 'Assets', panel => _build(panel),
+      { refresh: _refresh, onClose: () => { _table = null; _selectedRow = null; _isNew = false; } });
   }
 
   function _build(panel) {
@@ -18,7 +19,7 @@ const AssetsTab = (() => {
             <div class="form-col">
               <div class="form-field"><label>Symbol</label><input class="form-control form-readonly" id="ast-f-symbol" readonly></div>
               <div class="form-field"><label>Description</label><input class="form-control" id="ast-f-desc"></div>
-              <div class="form-field"><label>Notes</label><input class="form-control" id="ast-f-notes"></div>
+              <div class="form-field"><label>Note</label><input class="form-control" id="ast-f-notes" placeholder="latest note; a changed note is added to the history"></div>
             </div>
             <div class="form-col">
               <div class="form-field"><label>Type</label>
@@ -71,7 +72,14 @@ const AssetsTab = (() => {
         { title: 'Type',        field: 'Type',        widthGrow: 1, headerFilter: true, headerSortTristate: true },
         { title: 'Theme',       field: 'Theme',       widthGrow: 2, headerFilter: true, headerSortTristate: true },
         { title: 'Category',    field: 'Category',    widthGrow: 2, headerFilter: true, headerSortTristate: true },
-        { title: 'Notes',       field: 'Notes',       widthGrow: 2, headerFilter: true, headerSortTristate: true }
+        { title: 'Notes',       field: 'Notes',       widthGrow: 2, headerFilter: true, headerSortTristate: true },
+        { title: 'Action', field: 'NoteCount', width: 80, hozAlign: 'center', headerSort: false,
+          formatter: cell => cell.getValue() > 0 ? `<button class="act-btn analyze-btn">Notes</button>` : '',
+          cellClick: (e, cell) => {
+            if (!e.target.classList.contains('act-btn')) return;
+            _showNotes(cell.getRow().getData().Symbol);
+          }
+        }
       ]
     });
 
@@ -112,14 +120,22 @@ const AssetsTab = (() => {
 
   function _loadData() {
     return DB.query(`
-      SELECT a.Symbol, a.Description, a.Type, a.Category, a.Theme, a.Notes, a.Active,
-        COALESCE(l.TotalQty, 0) AS Quantity
+      SELECT a.Symbol, a.Description, a.Type, a.Category, a.Theme, a.Active,
+        COALESCE(h.Quantity, 0) AS Quantity,
+        (SELECT n.Note FROM Notes n WHERE n.Symbol = a.Symbol ORDER BY n.Timestamp DESC, n.Note_ID DESC LIMIT 1) AS Notes,
+        (SELECT COUNT(*) FROM Notes n WHERE n.Symbol = a.Symbol) AS NoteCount
       FROM Assets a
-      LEFT JOIN (
-        SELECT Symbol, SUM(Quantity) AS TotalQty FROM Ledger WHERE Valid=1 GROUP BY Symbol
-      ) l ON a.Symbol = l.Symbol
+      LEFT JOIN v_holdings h ON a.Symbol = h.Symbol
       WHERE a.Active = 1
       ORDER BY a.Symbol`);
+  }
+
+  // Popup with all notes of an asset in chronological order
+  async function _showNotes(symbol) {
+    const notes = DB.query('SELECT Timestamp, Note FROM Notes WHERE Symbol=? ORDER BY Timestamp, Note_ID', [symbol]);
+    const items = notes.map(n =>
+      `<div class="note-item"><div class="note-ts">${_esc(n.Timestamp)}</div><div>${_esc(n.Note)}</div></div>`).join('');
+    await Dialogs.alertHtml(`<div class="note-list">${items || '<p>No notes.</p>'}</div>`, `${symbol} Notes`);
   }
 
   function _attachThemeAutocomplete(inputEl, listEl) {
@@ -207,12 +223,19 @@ const AssetsTab = (() => {
     if (!symbol) { await Dialogs.alert('Symbol is required.'); return; }
 
     if (_isNew) {
-      DB.run('INSERT OR IGNORE INTO Assets (Symbol, Description, Type, Category, Theme, Notes, Active) VALUES (?,?,?,?,?,?,1)',
-        [symbol, desc, type, cat, theme, notes]);
+      DB.run('INSERT OR IGNORE INTO Assets (Symbol, Description, Type, Category, Theme, Active) VALUES (?,?,?,?,?,1)',
+        [symbol, desc, type, cat, theme]);
     } else {
-      DB.run('UPDATE Assets SET Description=?, Type=?, Category=?, Theme=?, Notes=? WHERE Symbol=?',
-        [desc, type, cat, theme, notes, _selectedRow.Symbol]);
+      DB.run('UPDATE Assets SET Description=?, Type=?, Category=?, Theme=? WHERE Symbol=?',
+        [desc, type, cat, theme, _selectedRow.Symbol]);
     }
+    // A new or changed note is added to the note history
+    const latest = _isNew ? '' : (_selectedRow.Notes || '');
+    if (notes && notes !== latest) {
+      DB.run('INSERT INTO Notes (Symbol, Timestamp, Note) VALUES (?,?,?)', [symbol, _nowTs(), notes]);
+    }
+    // Keep the form bound to the saved asset so a further Accept updates it (and its note) again
+    _selectedRow = { ...(_selectedRow || {}), Symbol: _isNew ? symbol : _selectedRow.Symbol, Notes: notes || latest };
     document.getElementById('ast-btn-accept').disabled = true;
     _isNew = false;
     _refresh();
@@ -221,9 +244,11 @@ const AssetsTab = (() => {
 
   async function _deleteSelected() {
     const prices = DB.query('SELECT COUNT(*) AS cnt FROM Prices WHERE Symbol=? AND Valid=1', [_selectedRow.Symbol]);
-    const ledger = DB.query('SELECT COUNT(*) AS cnt FROM Ledger WHERE Symbol=? AND Valid=1', [_selectedRow.Symbol]);
-    if (prices[0].cnt > 0 || ledger[0].cnt > 0) {
-      await Dialogs.alert(`Cannot delete: "${_selectedRow.Symbol}" has ${ledger[0].cnt} transaction(s) and ${prices[0].cnt} price record(s).`);
+    const txns   = DB.query('SELECT COUNT(*) AS cnt FROM Transactions WHERE Symbol=? AND Valid=1', [_selectedRow.Symbol]);
+    const ledger = DB.query('SELECT COUNT(*) AS cnt FROM Ledger WHERE Symbol=? AND Active=1', [_selectedRow.Symbol]);
+    if (prices[0].cnt > 0 || txns[0].cnt > 0 || ledger[0].cnt > 0) {
+      await Dialogs.alert(`Cannot delete: "${_selectedRow.Symbol}" has ${txns[0].cnt} transaction(s), ` +
+        `${ledger[0].cnt} ledger entr${ledger[0].cnt === 1 ? 'y' : 'ies'} and ${prices[0].cnt} price record(s).`);
       return;
     }
     const ok = await Dialogs.confirm(`Deactivate asset "${_selectedRow.Symbol}"?`);

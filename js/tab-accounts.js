@@ -5,7 +5,8 @@ const AccountsTab = (() => {
   let _isNew = false;
 
   function open() {
-    App.Tabs.open(TAB_ID, 'Accounts', panel => _build(panel), { refresh: _refresh });
+    App.Tabs.open(TAB_ID, 'Accounts', panel => _build(panel),
+      { refresh: _refresh, onClose: () => { _table = null; _selectedRow = null; _isNew = false; } });
   }
 
   function _build(panel) {
@@ -102,13 +103,8 @@ const AccountsTab = (() => {
         SELECT l.Account_ID,
           SUM(l.Quantity * COALESCE(p.Price, 0)) AS AssetsValue
         FROM Ledger l
-        LEFT JOIN (
-          SELECT Symbol, Price FROM Prices
-          WHERE Valid = 1
-          GROUP BY Symbol
-          HAVING Timestamp = MAX(Timestamp)
-        ) p ON l.Symbol = p.Symbol
-        WHERE l.Valid = 1
+        LEFT JOIN v_latest_price p ON l.Symbol = p.Symbol
+        WHERE l.Active = 1
         GROUP BY l.Account_ID
       ) inv ON a.Account_ID = inv.Account_ID
       WHERE a.Active = 1
@@ -158,7 +154,7 @@ const AccountsTab = (() => {
   }
 
   async function _deleteSelected() {
-    const refs = DB.query('SELECT COUNT(*) AS cnt FROM Ledger WHERE Account_ID=? AND Valid=1',
+    const refs = DB.query('SELECT COUNT(*) AS cnt FROM Transactions WHERE Account_ID=? AND Valid=1',
       [_selectedRow.Account_ID]);
     if (refs[0].cnt > 0) {
       await Dialogs.alert(`Cannot delete: this account has ${refs[0].cnt} transaction(s).`);

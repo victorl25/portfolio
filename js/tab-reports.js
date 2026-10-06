@@ -4,7 +4,7 @@ const ReportsTab = (() => {
   function open() {
     const id = `rpt-${++_ctr}`;
     App.Tabs.open(id, 'Performance', panel => _build(panel, id),
-      { closeable: true, refresh: () => _computeReport(id), autoRefresh: false });
+      { refresh: () => _computeReport(id), autoRefresh: false });
   }
 
   async function openAccount() {
@@ -15,7 +15,7 @@ const ReportsTab = (() => {
 
     const id = `rpt-${++_ctr}`;
     App.Tabs.open(id, `Performance — ${accountName}`, panel => _build(panel, id, accountId),
-      { closeable: true, refresh: () => _computeReport(id, accountId), autoRefresh: false });
+      { refresh: () => _computeReport(id, accountId), autoRefresh: false });
   }
 
   async function _selectAccountDialog() {
@@ -112,21 +112,17 @@ const ReportsTab = (() => {
     }
     const reportLabel = accountName || 'Portfolio';
 
-    const where  = accountId ? 'l.Valid = 1 AND l.Account_ID = ?' : 'l.Valid = 1';
+    const where  = accountId ? 'l.Active = 1 AND l.Quantity <> 0 AND l.Account_ID = ?' : 'l.Active = 1 AND l.Quantity <> 0';
     const params = accountId ? [accountId] : [];
 
+    // Current positions (active Ledger entries) with their remaining cost basis
     const assets = DB.query(`
-      SELECT l.Symbol, SUM(l.Quantity) AS Quantity, p.Price
+      SELECT l.Symbol, SUM(l.Quantity) AS Quantity, SUM(l.Cost_Basis) AS CostBasis, p.Price
       FROM Ledger l
-      LEFT JOIN (
-        SELECT Symbol, Price FROM Prices
-        WHERE Valid = 1
-        GROUP BY Symbol
-        HAVING Timestamp = MAX(Timestamp)
-      ) p ON l.Symbol = p.Symbol
+      LEFT JOIN v_latest_price p ON l.Symbol = p.Symbol
       WHERE ${where}
       GROUP BY l.Symbol
-      HAVING SUM(l.Quantity) > 0
+      HAVING SUM(l.Quantity) <> 0
       ORDER BY l.Symbol`, params);
 
     if (!assets.length) {
@@ -134,11 +130,6 @@ const ReportsTab = (() => {
       _renderSummary(panel, id, null, null, null, reportLabel);
       return;
     }
-
-    // Open-lot cost basis (FIFO) — see _computeCostBasisMap in app.js. A naive
-    // SUM(Quantity*Price) here would incorrectly fold the realized gain/loss of any prior
-    // fully-closed round trip into the cost basis of shares bought afterward.
-    const costMap = _computeCostBasisMap('', where, params);
 
     const { yearStart, quarterStart } = _periodStarts();
 
@@ -165,11 +156,11 @@ const ReportsTab = (() => {
 
       const price = a.Price || 0;
       const value = a.Quantity * price;
-      const costBasis = costMap.get(a.Symbol)?.costBasis ?? 0;
+      const costBasis = a.CostBasis || 0;
 
       const pctYTD   = baseYTD ? (price - baseYTD.price) / baseYTD.price * 100 : null;
       const pctQTD   = baseQTD ? (price - baseQTD.price) / baseQTD.price * 100 : null;
-      const pctTotal = costBasis ? (value - costBasis) / costBasis * 100 : null;
+      const pctTotal = costBasis ? (value - costBasis) / Math.abs(costBasis) * 100 : null;   // abs: short positions have negative basis
 
       if (baseYTD) { startYTD += a.Quantity * baseYTD.price; curYTD += value; }
       if (baseQTD) { startQTD += a.Quantity * baseQTD.price; curQTD += value; }
@@ -192,7 +183,7 @@ const ReportsTab = (() => {
       panel._rptTable.redraw(true);
     }
 
-    const avgTotal = sumCostBasis > 0 ? (sumValue - sumCostBasis) / sumCostBasis * 100 : null;
+    const avgTotal = sumCostBasis ? (sumValue - sumCostBasis) / Math.abs(sumCostBasis) * 100 : null;
     const avgYTD = startYTD > 0 ? (curYTD - startYTD) / startYTD * 100 : null;
     const avgQTD = startQTD > 0 ? (curQTD - startQTD) / startQTD * 100 : null;
     _renderSummary(panel, id, avgTotal, avgYTD, avgQTD, reportLabel);
@@ -204,14 +195,14 @@ const ReportsTab = (() => {
     }
   }
 
-  // Looks up the Symbol's price on the first market day on/after periodStart.
-  // Checks the Prices table first (within a short window); falls back to
+  // Looks up the Symbol's closing price on the first market day on/after periodStart.
+  // Checks the daily Prices first (within a short window); falls back to
   // Yahoo Finance's get_chart and records the result for future reuse.
   async function _getBaseline(symbol, periodStart, failures, label) {
     const windowEnd = _addDays(periodStart, 9);
     const cached = DB.query(
-      'SELECT Timestamp, Price FROM Prices WHERE Symbol=? AND Valid=1 AND Timestamp>=? AND Timestamp<? ORDER BY Timestamp ASC LIMIT 1',
-      [symbol, periodStart + ' 00:00:00', windowEnd + ' 00:00:00']);
+      'SELECT Date, Price FROM Prices WHERE Symbol=? AND Valid=1 AND Date>=? AND Date<? ORDER BY Date ASC LIMIT 1',
+      [symbol, periodStart, windowEnd]);
     if (cached.length) return { price: cached[0].Price };
 
     try {
@@ -223,10 +214,8 @@ const ReportsTab = (() => {
         failures.push({ symbol: `${symbol} (${label})`, reason: 'no trading data in period' });
         return null;
       }
-      const ts    = _isoToLocalTs(first.date);
       const price = Math.round(first.close * 100) / 100;
-      DB.run('INSERT INTO Prices (Timestamp, Symbol, Price, Currency, Valid) VALUES (?,?,?,?,1)',
-        [ts, symbol, price, 'USD']);
+      _upsertPrice(symbol, _isoToDate(first.date), price, 'USD');
       return { price };
     } catch (e) {
       await new Promise(r => setTimeout(r, 100));
@@ -260,12 +249,6 @@ const ReportsTab = (() => {
     dt.setUTCDate(dt.getUTCDate() + days);
     const p = n => String(n).padStart(2, '0');
     return `${dt.getUTCFullYear()}-${p(dt.getUTCMonth() + 1)}-${p(dt.getUTCDate())}`;
-  }
-
-  function _isoToLocalTs(iso) {
-    const d = new Date(iso);
-    const p = n => String(n).padStart(2, '0');
-    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
   }
 
   function _fmtNum(v) {

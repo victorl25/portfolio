@@ -1,7 +1,8 @@
 # Features toimplement in the future
 
-1. Report year-to-date gain/loss, query first stock close this year and save to Prices
-2. Compact Prices table tool to delete many indetmediate price quotes no longer needed
+1. Realized taxable gains and losses report (deferred from version 2.0) — derivable from the Ledger Parent chain (average cost) or computed FIFO from Transactions
+2. Portfolio balance history / trend chart with YTD and 1-year change net of Transfer flows (deferred from version 2.0) — daily holdings replayed from Transactions × daily Prices + cash; show an error when a year of price data is not available
+3. Option position valuation (option quotes) so written calls/puts can be included in the portfolio value
 
 
 
@@ -12,7 +13,7 @@ Tools provided by Yahoo Finance MCP server: https://gateway.mcpservers.org/yahoo
   Real-time (or near real-time) quote data for one or more symbols.
   - Input: symbols (array of strings, required) — e.g. ["AAPL", "MSFT"]
   - Returns: price, change, OHLC, volume, market cap, 52-week range, and more
-  - Used by the app for App.ensureAsset() and Tools > Update Prices
+  - Used by the app for App.ensureAsset(), the Prices tab Update button and Portfolio symbol validation
 
   2. search
 
@@ -28,7 +29,7 @@ Tools provided by Yahoo Finance MCP server: https://gateway.mcpservers.org/yahoo
   - Input: symbol (required), period1 (start date, required), period2 (end date, optional, defaults to now), interval
   (default 1d; one of 1m 2m 5m 15m 30m 60m 90m 1h 1d 5d 1wk 1mo 3mo — intraday intervals only support recent ranges),
   events (pipe-separated, e.g. div|split), includePrePost (bool, default false)
-  - Not currently used — this would be the natural tool to back a future price-history chart or the "Analyze" stub tabs
+  - Used by Tools > Update Prices (daily closes), the Reports tab (YTD/QTD baselines) and Analyze > Assets
 
   4. quote_summary
 
@@ -47,4 +48,4 @@ Tools provided by Yahoo Finance MCP server: https://gateway.mcpservers.org/yahoo
   All four report "taskSupport":"forbidden" in their execution metadata (synchronous calls only, no background task
   polling), and the server identifies itself as yahoo-finance-mcp v1.0.0.
 
-  Only get_quote and quote_summary are wired into the app today; search and get_chart are available but unused.
+  get_quote, quote_summary and get_chart are used by the app; search is available but unused.

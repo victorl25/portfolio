@@ -3,7 +3,7 @@ const QueryTab = (() => {
 
   function open() {
     const id = `qry-${++_ctr}`;
-    App.Tabs.open(id, 'Query', panel => _build(panel, id), { closeable: true });
+    App.Tabs.open(id, 'Query', panel => _build(panel, id));
   }
 
   function _build(panel, id) {

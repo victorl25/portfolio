@@ -1,5 +1,8 @@
 const PortfolioTab = (() => {
   let _ctr = 0;
+  let _hldCtr = 0;
+
+  const MONEY = { formatter: 'money', formatterParams: { decimal: '.', thousand: ',', symbol: '$', precision: 2 } };
 
   function open(accountId, theme) {
     const id = `prt-${++_ctr}`;
@@ -13,7 +16,7 @@ const PortfolioTab = (() => {
       label = theme || '(No Theme)';
     }
     App.Tabs.open(id, label, panel => _build(panel, id, accountId, theme),
-      { closeable: !!accountId || hasTheme, refresh: () => _refresh(id, accountId, theme) });
+      { refresh: () => _refresh(id, accountId, theme) });
   }
 
   function _build(panel, id, accountId, theme) {
@@ -24,8 +27,8 @@ const PortfolioTab = (() => {
           <div id="${id}-total" style="font-size:16px;font-weight:700;color:#222;padding:6px 16px 4px;border-bottom:1px solid #e0e0e0;"></div>
           <div class="form-body" style="align-items:top;flex:1;">
             <div style="flex:1;display:flex;flex-direction:column;gap:6px;padding:6px 0;">
-              <label style="font-size:12px;color:#666;font-weight:500;">Enter transaction (e.g. "+100 AAPL @ 150", "buy 50 MSFT at 300", "sell all AAPL @ 220")</label>
-              <input class="form-control" id="${id}-txinput" placeholder="+100 AAPL @ 150.00" style="font-size:14px;">
+              <label style="font-size:12px;color:#666;font-weight:500;">Enter transaction (e.g. "+100 AAPL $150", "buy 50 MSFT $300 2026-09-30", "sell all AAPL $220", "-2 NVDA20270115C360 $3.20")</label>
+              <input class="form-control" id="${id}-txinput" placeholder="+100 AAPL $150.00 [YYYY-MM-DD]" style="font-size:14px;">
             </div>
           </div>
         </div>
@@ -45,37 +48,16 @@ const PortfolioTab = (() => {
             const a = document.createElement('a');
             a.className = 'cell-link';
             a.textContent = cell.getValue();
-            a.addEventListener('click', e => {
-              e.stopPropagation();
-              const filter = { symbol: cell.getValue() };
-              if (accountId) filter.accountId = accountId;
-              TransactionsTab.open(filter);
-            });
+            a.addEventListener('click', e => { e.stopPropagation(); openHoldings(cell.getValue(), accountId); });
             return a;
           }
         },
         { title: 'Quantity', field: 'Quantity',  headerSortTristate: true,
           formatter: cell => _fmtNum(cell.getValue()) },
-        { title: 'Price', field: 'Price', headerSortTristate: true,
-          formatter: 'money', formatterParams: { decimal: '.', thousand: ',', symbol: '$', precision: 2 } },
-        { title: 'Value', field: 'Value', headerSortTristate: true,
-          formatter: 'money', formatterParams: { decimal: '.', thousand: ',', symbol: '$', precision: 2 } },
-        { title: 'Gain / Loss', field: 'GainLoss', headerSortTristate: true,
-          formatter: cell => {
-            const v = cell.getValue();
-            cell.getElement().style.color = v < 0 ? '#c0392b' : v > 0 ? '#27ae60' : '';
-            return (v < 0 ? '-' : v > 0 ? '+' : '') + '$' +
-              Math.abs(v || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-          }
-        },
-        { title: '% Gain/Loss', field: 'GainLossPct', headerSortTristate: true,
-          formatter: cell => {
-            const v = cell.getValue();
-            if (v == null) return '—';
-            cell.getElement().style.color = v < 0 ? '#c0392b' : v > 0 ? '#27ae60' : '';
-            return (v > 0 ? '+' : '') + v.toFixed(2) + '%';
-          }
-        },
+        { title: 'Price', field: 'Price', headerSortTristate: true, ...MONEY },
+        { title: 'Value', field: 'Value', headerSortTristate: true, ...MONEY },
+        { title: 'Gain / Loss', field: 'GainLoss', headerSortTristate: true, formatter: _fmtGainLoss },
+        { title: '% Gain/Loss', field: 'GainLossPct', headerSortTristate: true, formatter: _fmtPct },
         { title: '% Portfolio', field: 'Percent', headerSortTristate: true,
           formatter: cell => {
             const v = cell.getValue();
@@ -101,15 +83,16 @@ const PortfolioTab = (() => {
     });
   }
 
+  // Current positions from the active Ledger entries (quantity 0 excluded), valued at the latest price.
   function _loadData(accountId, theme) {
-    let where = 'l.Valid = 1';
+    let where = 'l.Active = 1 AND l.Quantity <> 0';
     const params = [];
     if (accountId) { where += ' AND l.Account_ID = ?'; params.push(accountId); }
 
     const isThemeFiltered = theme !== undefined && theme !== null;
     let themeJoin = '';
     if (isThemeFiltered) {
-      themeJoin = 'JOIN Assets ta ON ta.Symbol = l.Symbol';
+      themeJoin = 'LEFT JOIN Assets ta ON ta.Symbol = l.Symbol';
       if (theme === '') {
         where += " AND (ta.Theme IS NULL OR ta.Theme = '')";
       } else {
@@ -121,25 +104,15 @@ const PortfolioTab = (() => {
     const rows = DB.query(`
       SELECT l.Symbol,
         SUM(l.Quantity) AS Quantity,
+        SUM(l.Cost_Basis) AS CostBasis,
         p.Price,
         SUM(l.Quantity) * COALESCE(p.Price, 0) AS Value
       FROM Ledger l
       ${themeJoin}
-      LEFT JOIN (
-        SELECT Symbol, Price FROM Prices
-        WHERE Valid = 1
-        GROUP BY Symbol
-        HAVING Timestamp = MAX(Timestamp)
-      ) p ON l.Symbol = p.Symbol
+      LEFT JOIN v_latest_price p ON l.Symbol = p.Symbol
       WHERE ${where}
       GROUP BY l.Symbol
-      HAVING SUM(l.Quantity) > 0`, params);
-
-    // Open-lot cost basis (FIFO) — computed separately from raw transactions rather than a
-    // naive SUM(Quantity*Price) aggregate, which would incorrectly fold the realized gain/loss
-    // of any prior fully-closed round trip into the cost basis of shares bought afterward.
-    const costMap = _computeCostBasisMap(themeJoin, where, params);
-    rows.forEach(r => { r.CostBasis = costMap.get(r.Symbol)?.costBasis ?? 0; });
+      HAVING SUM(l.Quantity) <> 0`, params);
 
     const assetsTotal = rows.reduce((s, r) => s + (r.Value || 0), 0);
 
@@ -158,29 +131,121 @@ const PortfolioTab = (() => {
 
     rows.forEach(r => {
       r.Percent      = total > 0 ? (r.Value || 0) / total * 100 : 0;
-      r.GainLoss     = (r.Value || 0) - r.CostBasis;
-      r.GainLossPct  = r.CostBasis ? r.GainLoss / r.CostBasis * 100 : null;
+      r.GainLoss     = (r.Value || 0) - (r.CostBasis || 0);
+      r.GainLossPct  = r.CostBasis ? r.GainLoss / Math.abs(r.CostBasis) * 100 : null;   // abs: shorts have negative basis
     });
     return { rows, total };
   }
 
+  // ── Holdings drill-down: one row per account for a symbol ───────────────
+  function openHoldings(symbol, accountId) {
+    const id = `hld-${++_hldCtr}`;
+    App.Tabs.open(id, `${symbol} holdings`, panel => _buildHoldings(panel, id, symbol, accountId),
+      { refresh: () => _refreshHoldings(id, symbol, accountId) });
+  }
+
+  function _buildHoldings(panel, id, symbol, accountId) {
+    panel.innerHTML = `
+      <div class="rpt-layout">
+        <div class="rpt-table-zone" id="${id}-table-wrap"></div>
+        <div class="rpt-summary" id="${id}-summary"></div>
+      </div>`;
+    const rows = _loadHoldings(symbol, accountId);
+    panel._hldTable = new Tabulator(`#${id}-table-wrap`, {
+      data: rows,
+      layout: 'fitColumns',
+      selectableRows: 1,
+      height: '100%',
+      columns: [
+        { title: 'Account', field: 'Name', headerSortTristate: true,
+          formatter: cell => {
+            const a = document.createElement('a');
+            a.className = 'cell-link';
+            a.textContent = cell.getValue();
+            a.addEventListener('click', e => {
+              e.stopPropagation();
+              TransactionsTab.open({ symbol, accountId: cell.getRow().getData().Account_ID });
+            });
+            return a;
+          }
+        },
+        { title: 'Quantity', field: 'Quantity', headerSortTristate: true, formatter: cell => _fmtNum(cell.getValue()) },
+        { title: 'Avg Cost', field: 'AvgCost', headerSortTristate: true, ...MONEY },
+        { title: 'Cost Basis', field: 'Cost_Basis', headerSortTristate: true, ...MONEY },
+        { title: 'Price', field: 'Price', headerSortTristate: true, ...MONEY },
+        { title: 'Value', field: 'Value', headerSortTristate: true, ...MONEY },
+        { title: 'Gain / Loss', field: 'GainLoss', headerSortTristate: true, formatter: _fmtGainLoss },
+        { title: '% Gain/Loss', field: 'GainLossPct', headerSortTristate: true, formatter: _fmtPct }
+      ]
+    });
+    _renderHoldingsSummary(panel, id, symbol, rows);
+  }
+
+  function _loadHoldings(symbol, accountId) {
+    const params = [symbol];
+    let where = 'l.Active = 1 AND l.Quantity <> 0 AND l.Symbol = ?';
+    if (accountId) { where += ' AND l.Account_ID = ?'; params.push(accountId); }
+    const rows = DB.query(`
+      SELECT l.Account_ID, a.Name, l.Quantity, l.Cost_Basis, p.Price,
+        l.Quantity * COALESCE(p.Price, 0) AS Value
+      FROM Ledger l
+      JOIN Accounts a ON a.Account_ID = l.Account_ID
+      LEFT JOIN v_latest_price p ON p.Symbol = l.Symbol
+      WHERE ${where}
+      ORDER BY a.Name`, params);
+    rows.forEach(r => {
+      r.AvgCost     = r.Quantity ? r.Cost_Basis / r.Quantity : null;
+      r.GainLoss    = (r.Value || 0) - (r.Cost_Basis || 0);
+      r.GainLossPct = r.Cost_Basis ? r.GainLoss / Math.abs(r.Cost_Basis) * 100 : null;
+    });
+    return rows;
+  }
+
+  function _renderHoldingsSummary(panel, id, symbol, rows) {
+    const el = panel.querySelector(`#${id}-summary`);
+    if (!el) return;
+    const qty  = rows.reduce((s, r) => s + r.Quantity, 0);
+    const cost = rows.reduce((s, r) => s + r.Cost_Basis, 0);
+    const val  = rows.reduce((s, r) => s + (r.Value || 0), 0);
+    el.innerHTML = `<span class="label">${_esc(symbol)}:</span>
+      <span>Quantity <b>${_fmtNum(qty)}</b></span>
+      <span>Avg Cost <b>${qty ? Fmt.currency(cost / qty) : '—'}</b></span>
+      <span>Value <b>${Fmt.currency(val)}</b></span>
+      <span>Gain / Loss <b style="color:${val - cost < 0 ? '#c0392b' : '#27ae60'}">${Fmt.currency(val - cost)}</b></span>`;
+  }
+
+  function _refreshHoldings(tabId, symbol, accountId) {
+    const panel = document.getElementById(`panel-${tabId}`);
+    if (!panel || !panel._hldTable) return;
+    const rows = _loadHoldings(symbol, accountId);
+    panel._hldTable.replaceData(rows);
+    _renderHoldingsSummary(panel, tabId, symbol, rows);
+  }
+
+  // ── Transaction entry ───────────────────────────────────────────────────
   async function _handleInput(text, id, accountId) {
     if (!text) return;
-    const parsed = _parseEntry(text);
-    if (!parsed) { await Dialogs.alert('Could not parse entry. Try "+100 AAPL @ 150", "buy 100 AAPL at 150", or "sell all MSFT @ 291.5".'); return; }
+    const parsed = parseEntry(text);
+    if (!parsed) {
+      await Dialogs.alert('Could not parse entry. Try "+100 AAPL $150", "buy 100 AAPL $150 2026-09-30", ' +
+        '"sell all MSFT $291.5", or "-2 NVDA20270115C360 $3.20".');
+      return;
+    }
+    const isOption = Engine.isOption(parsed.symbol);
 
     if (parsed.all) {
-      let qSql = 'SELECT COALESCE(SUM(Quantity), 0) AS total FROM Ledger WHERE Valid=1 AND Symbol=?';
+      let qSql = 'SELECT COALESCE(SUM(Quantity), 0) AS total FROM Ledger WHERE Active=1 AND Symbol=?';
       const qParams = [parsed.symbol];
       if (accountId) { qSql += ' AND Account_ID=?'; qParams.push(accountId); }
-      const res = DB.query(qSql, qParams);
-      const ownedQty = res[0]?.total || 0;
+      const table = isOption ? 'Options' : 'Ledger';
+      const res = DB.query(qSql.replace('FROM Ledger', `FROM ${table}`), qParams);
+      const ownedQty = Math.abs(res[0]?.total || 0);
+      if (!ownedQty) { await Dialogs.alert(`No ${parsed.symbol} holdings found.`); return; }
       parsed.quantity = parsed.sell ? -ownedQty : ownedQty;
     }
 
-    // Validate symbol via Yahoo Finance if not already in the Assets table
-    const knownAsset = DB.query('SELECT Symbol FROM Assets WHERE Symbol=?', [parsed.symbol]);
-    if (!knownAsset.length) {
+    // Validate the symbol: option symbols by format, unknown equities via Yahoo Finance
+    if (!isOption && !DB.query('SELECT Symbol FROM Assets WHERE Symbol=?', [parsed.symbol]).length) {
       let quote = null;
       try {
         quote = await YahooFinance.getQuote(parsed.symbol);
@@ -194,20 +259,16 @@ const PortfolioTab = (() => {
       }
     }
 
-    const isSell  = parsed.quantity < 0;
     const sellQty = Math.abs(parsed.quantity || 0);
-
     let accounts;
-    if (isSell) {
+    if (parsed.quantity < 0 && !isOption) {
+      // Equity sales: only accounts that hold enough shares
       const accFilter = accountId ? 'AND a.Account_ID = ?' : '';
-      const params    = accountId
-        ? [parsed.symbol, accountId, sellQty]
-        : [parsed.symbol, sellQty];
+      const params    = accountId ? [parsed.symbol, accountId, sellQty] : [parsed.symbol, sellQty];
       accounts = DB.query(`
-        SELECT a.Account_ID, a.Account, a.Name,
-          COALESCE(SUM(l.Quantity), 0) AS Holdings
+        SELECT a.Account_ID, a.Account, a.Name, COALESCE(SUM(l.Quantity), 0) AS Holdings
         FROM Accounts a
-        LEFT JOIN Ledger l ON l.Account_ID = a.Account_ID AND l.Symbol = ? AND l.Valid = 1
+        LEFT JOIN Ledger l ON l.Account_ID = a.Account_ID AND l.Symbol = ? AND l.Active = 1
         WHERE a.Active = 1 ${accFilter}
         GROUP BY a.Account_ID
         HAVING COALESCE(SUM(l.Quantity), 0) >= ?
@@ -237,12 +298,14 @@ const PortfolioTab = (() => {
             <div style="display:grid;grid-template-columns:120px 1fr;gap:8px 12px;align-items:center;">
               <label style="font-size:13px;color:#555;text-align:right;">Account</label>
               <select class="dlg-select" id="ptx-account">${accOpts}</select>
+              <label style="font-size:13px;color:#555;text-align:right;">Date</label>
+              <input class="dlg-input" id="ptx-date" type="date" value="${_esc(parsed.date || _todayStr())}" style="margin-top:0;">
               <label style="font-size:13px;color:#555;text-align:right;">Symbol</label>
               <input class="dlg-input" id="ptx-symbol" value="${_esc(parsed.symbol)}" style="margin-top:0;">
               <label style="font-size:13px;color:#555;text-align:right;">Quantity</label>
               <input class="dlg-input" id="ptx-qty" type="number" step="any" value="${parsed.quantity}" style="margin-top:0;">
               <label style="font-size:13px;color:#555;text-align:right;">Price</label>
-              <input class="dlg-input" id="ptx-price" type="number" step="0.01" value="${parsed.price}" style="margin-top:0;">
+              <input class="dlg-input" id="ptx-price" type="number" step="any" value="${parsed.price}" style="margin-top:0;">
               <label style="font-size:13px;color:#555;text-align:right;">Currency</label>
               <input class="dlg-input" id="ptx-currency" value="USD" maxlength="3" style="margin-top:0;">
             </div>
@@ -256,69 +319,57 @@ const PortfolioTab = (() => {
 
       c.querySelector('#ptx-cancel').addEventListener('click', () => { Dialogs.close(); resolve(); });
       c.querySelector('#ptx-ok').addEventListener('click', async () => {
-        const selAccountId = c.querySelector('#ptx-account').value;
-        const symbol   = c.querySelector('#ptx-symbol').value.trim().toUpperCase();
+        const selAccountId = Number(c.querySelector('#ptx-account').value);
+        const date     = c.querySelector('#ptx-date').value;
+        const symbol   = Engine.normalizeSymbol(c.querySelector('#ptx-symbol').value);
         const qty      = parseFloat(c.querySelector('#ptx-qty').value);
         const price    = parseFloat(c.querySelector('#ptx-price').value);
         const currency = c.querySelector('#ptx-currency').value.trim() || 'USD';
 
-        if (!selAccountId || !symbol || isNaN(qty) || isNaN(price)) {
+        if (!selAccountId || !symbol || !/^\d{4}-\d{2}-\d{2}$/.test(date) || isNaN(qty) || !qty || isNaN(price)) {
           c.querySelector('#ptx-err').textContent = 'All fields are required.';
           return;
         }
-
         Dialogs.close();
-        const ts = _nowTs();
 
-        await App.ensureAsset(symbol);
-
-        const existingPrices = DB.query('SELECT COUNT(*) AS cnt FROM Prices WHERE Symbol=?', [symbol]);
-        if (!existingPrices[0].cnt) {
-          DB.run('INSERT INTO Prices (Timestamp, Symbol, Price, Currency, Valid) VALUES (?,?,?,?,1)',
-            [ts, symbol, Math.round(price * 100) / 100, currency]);
+        const opt = Engine.isOption(symbol);
+        try {
+          await DB.transaction(() => Engine.record({
+            Account_ID: selAccountId, Date: date, Effect: 'Trade', Category: opt ? 'Option' : 'Equity',
+            Symbol: symbol, Quantity: qty, Price: price, Currency: currency, Description: `Manual entry: ${text}`,
+            Amount: Engine.resolveAmount({ amount: null, quantity: qty, price, effect: 'Trade', symbol })
+          }));
+        } catch (e) {
+          await Dialogs.alert(`Could not record the transaction: ${e.message}`);
+          resolve();
+          return;
         }
-
-        const hash = _txHash(selAccountId, symbol, qty, price);
-        DB.run(`INSERT OR IGNORE INTO Ledger
-          (Transaction_Hash, Timestamp, Account_ID, Symbol, Quantity, Price, Currency, Valid)
-          VALUES (?,?,?,?,?,?,?,1)`,
-          [hash, ts, selAccountId, symbol, qty, price, currency]);
-
-        DB.run('UPDATE Accounts SET Cash = Cash - ?, Last_Updated = ? WHERE Account_ID = ?',
-          [qty * price, ts, selAccountId]);
+        if (!opt) await App.ensureAsset(symbol);
 
         const el = document.getElementById(`${id}-txinput`);
         if (el) el.value = '';
-        _refresh(id, accountId);
-        App.onDataChanged(selAccountId);
+        App.onDataChanged();
         resolve();
       });
     });
   }
 
-  function _parseEntry(text) {
-    // "+100 AAPL @ 150" or "-100 AAPL @ 150"
-    let m = text.match(/^([+-]?\d+(?:\.\d+)?)\s+([A-Za-z.]+)\s*@\s*([\d.]+)$/);
-    if (m) return { quantity: parseFloat(m[1]), symbol: m[2].toUpperCase(), price: parseFloat(m[3]) };
+  // "+100 AAPL $150 [YYYY-MM-DD]", "-2 NVDA20270115C360 $3.20",
+  // "buy|bought|sell|sold [all|N] [shares of] SYMBOL $PRICE [YYYY-MM-DD]"
+  function parseEntry(text) {
+    const SYM = '([A-Za-z][A-Za-z0-9.]*)', PRICE = '\\$\\s*(\\d+(?:\\.\\d+)?|\\.\\d+)', DATE = '(?:\\s+(\\d{4}-\\d{2}-\\d{2}))?';
+    let m = text.match(new RegExp(`^([+-]?\\d+(?:\\.\\d+)?)\\s+${SYM}\\s+${PRICE}${DATE}$`));
+    if (m) return { quantity: parseFloat(m[1]), symbol: Engine.normalizeSymbol(m[2]), price: parseFloat(m[3]), date: m[4] || null };
 
-    // "buy/bought/sell/sold [all|N] [shares of] SYMBOL [at|@] PRICE"
-    m = text.match(/^(buy|bought|sell|sold)\s+(all|\d+(?:\.\d+)?)\s+(?:shares?\s+of\s+)?([A-Za-z.]+)\s+(?:at|@)\s+([\d.]+)/i);
+    m = text.match(new RegExp(`^(buy|bought|sell|sold)\\s+(all|\\d+(?:\\.\\d+)?)\\s+(?:shares?\\s+of\\s+)?${SYM}\\s+${PRICE}${DATE}$`, 'i'));
     if (m) {
-      const isSell = /^sell$|^sold$/i.test(m[1]);
-      if (m[2].toLowerCase() === 'all') {
-        return { quantity: null, all: true, sell: isSell, symbol: m[3].toUpperCase(), price: parseFloat(m[4]) };
-      }
+      const isSell = /^(sell|sold)$/i.test(m[1]);
+      const base = { symbol: Engine.normalizeSymbol(m[3]), price: parseFloat(m[4]), date: m[5] || null };
+      if (m[2].toLowerCase() === 'all') return { ...base, quantity: null, all: true, sell: isSell };
       const qty = parseFloat(m[2]);
-      return { quantity: isSell ? -qty : qty, symbol: m[3].toUpperCase(), price: parseFloat(m[4]) };
+      return { ...base, quantity: isSell ? -qty : qty };
     }
     return null;
-  }
-
-  function _txHash(accountId, symbol, qty, price) {
-    const key = `${accountId}|${symbol}|${qty}|${price}`;
-    let h = 0;
-    for (let i = 0; i < key.length; i++) { h = (Math.imul(31, h) + key.charCodeAt(i)) | 0; }
-    return key + '_' + Math.abs(h).toString(36);
   }
 
   function _renderTotal(panel, tabId, total, assetCount) {
@@ -336,11 +387,25 @@ const PortfolioTab = (() => {
     _renderTotal(panel, tabId, total, rows.length);
   }
 
+  function _fmtGainLoss(cell) {
+    const v = cell.getValue();
+    cell.getElement().style.color = v < 0 ? '#c0392b' : v > 0 ? '#27ae60' : '';
+    return (v < 0 ? '-' : v > 0 ? '+' : '') + '$' +
+      Math.abs(v || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function _fmtPct(cell) {
+    const v = cell.getValue();
+    if (v == null) return '—';
+    cell.getElement().style.color = v < 0 ? '#c0392b' : v > 0 ? '#27ae60' : '';
+    return (v > 0 ? '+' : '') + v.toFixed(2) + '%';
+  }
+
   function _fmtNum(v) {
     return v != null ? v.toLocaleString('en-US', { maximumFractionDigits: 4 }) : '';
   }
 
   function _esc(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
-  return { open };
+  return { open, openHoldings, parseEntry };
 })();

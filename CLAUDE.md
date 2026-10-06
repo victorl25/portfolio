@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-A single-page application for tracking portfolio of securities such as stocks and ETFs. Runs entirely locally in a bundled Chromium browser with no server, and no build step. Uses external services like Yahoo Finance MCP to retrieve price quotes and other asset data.
+A single-page application for tracking portfolio of securities such as stocks and ETFs (version 2: transaction-based — dividends, options, cash flows and a per-account ledger of held positions; see `design\VERSION_2.md` for the refactoring spec and `desihn\VERSION_2_PLAN.md` for the plan). Runs entirely locally in a bundled Chromium browser with no server, and no build step. Uses external services like Yahoo Finance MCP to retrieve price quotes and other asset data.
 
 ---
 
@@ -43,19 +43,24 @@ Portfolio/
     ├── tabulator.min.js    # Tabulator 6.x table library (local copy)
     └── tabulator.min.css   # Tabulator default theme (local copy)
 └── js/
-    ├── schema.js           # SCHEMA_SQL constant — DDL for all tables
-    ├── db.js               # DB global — sql.js wrapper (query, run, export, change tracking)
+    ├── schema.js           # SCHEMA_VERSION, SCHEMA_SQL (DDL + views), RULES_SEED (pre-populated import rules)
+    ├── db.js               # DB global — sql.js wrapper (query, run, transaction, export, version check, change tracking)
+    ├── engine.js           # Engine global — applies transactions to Ledger/Options/cash; rules, option symbols, rebuild
     ├── dialogs.js          # Dialogs global — modal alert/confirm/prompt/custom
-    ├── import.js           # Import global — CSV import flow
-    ├── tab-portfolio.js    # PortfolioTab global — multi-instance portfolio tab
+    ├── import.js           # Import global — Import holdings (positions snapshot) and Import transactions
+    ├── tab-portfolio.js    # PortfolioTab global — multi-instance portfolio tab + Holdings drill-down tabs
     ├── tab-accounts.js     # AccountsTab global — singleton accounts tab
-    ├── tab-assets.js       # AssetsTab global — singleton assets tab
+    ├── tab-assets.js       # AssetsTab global — singleton assets tab (with note history)
     ├── tab-prices.js       # PricesTab global — singleton prices tab
-    ├── tab-transactions.js # TransactionsTab global — multi-instance transactions tab
+    ├── tab-transactions.js # TransactionsTab global — multi-instance tab on the Transactions table
+    ├── tab-ledger.js       # LedgerTab global — singleton Ledger view (the v1 Transactions tab repurposed)
+    ├── tab-options.js      # OptionsTab global — singleton Options view
+    ├── tab-rules.js        # RulesTab global — singleton import Rules view
     ├── tab-query.js        # QueryTab global — multi-instance SQL query tab
     ├── tab-reports.js      # ReportsTab global — multi-instance Portfolio/Account performance report tabs
-    ├── tab-analysis.js     # AnalysisTab global — multi-instance Analyze tabs (Portfolio-by-Theme and Assets trend analysis implemented; Accounts still a stub)
-    └── app.js              # App/YahooFinance globals — init, menus, file ops, MCP client
+    ├── tab-analysis.js     # AnalysisTab global — multi-instance Analyze tabs (Portfolio/Account by Theme, Assets trend analysis)
+    └── app.js              # App/YahooFinance globals — init, menus, file ops, Update Prices, MCP client
+└── tests/                  # Automated tests (QuickJS + Python sqlite3), see tests/README.md
 ```
 
 ### Data Storage
@@ -98,8 +103,8 @@ The meaningful WASM component is `sql.js` (SQLite engine). All other application
 1. `portfolio.bat` (Windows) / `portfolio.sh` (macOS) accept an optional first argument as a DATA_DIR override (default: `<appDir>/data`). Create DATA_DIR if absent, scan it for `.db` files, find the most recent by filename (descending sort — filenames are timestamped so alphabetical order equals chronological order), then launch Chromium with `?dataDir=<forwardSlashPath>&db=<filename>` appended to the URL. Spaces in DATA_DIR are encoded as `%20`. On macOS, `portfolio.sh` also strips the leading `/` from the DATA_DIR path before passing it as a URL parameter (see note 2 below).
 2. `app.js` reads both URL parameters. `_dataDirUrl` is set to `file:///{dataDir}` when `?dataDir=` is present, or falls back to `{pageDir}data` when opening `index.html` directly. The DB is fetched from `${_dataDirUrl}/${dbFile}`. **Platform note**: Windows paths (`C:/foo`) have no leading slash, so `file:///C:/foo` is correct. macOS paths (`/Users/…`) would produce a 4-slash URL (`file:////Users/…`) if passed verbatim — `portfolio.sh` strips the leading `/` so the template produces the correct `file:///Users/…`.
 3. `_lastFileHandle` is loaded from IndexedDB (`PortfolioApp` database, `handles` store, key `'dbFile'`) at startup so the Save/Open dialogs open in the correct folder across Chromium restarts.
-4. If a file is found and loads successfully → `DB.loadFromBytes()`. If `_lastFileHandle` is still null after the IDB load, `showOpenFilePicker` is attempted (with `id: 'portfolio-db'`) to acquire a handle for the auto-loaded file; on success the handle is persisted to IDB. This is a one-time step per fresh Chromium profile.
-5. If no parameter or fetch fails → `DB.createNew()` (empty database with default Categories record).
+4. If a file is found → `DB.loadFromBytes()`, which first checks `Info.Schema_Version` (see Data Schema). A database created before version 2.0 (no `Info` table) or by a newer version is refused with a `DB.VersionError`: the app shows "Cannot open <file>" and continues with a new empty database (step 5). On success, if `_lastFileHandle` is still null after the IDB load, `showOpenFilePicker` is attempted (with `id: 'portfolio-db'`) to acquire a handle for the auto-loaded file; on success the handle is persisted to IDB. This is a one-time step per fresh Chromium profile.
+5. If no parameter, the fetch fails or the file is refused → `DB.createNew()` (empty v2 database with the `Info` row and the seeded import Rules).
 6. Portfolio tab opens immediately — no welcome screen or folder picker.
 
 Data folder: configurable via first argument to `portfolio.bat` / `portfolio.sh`; defaults to `data/` (created automatically by the launcher).
@@ -108,118 +113,71 @@ Data folder: configurable via first argument to `portfolio.bat` / `portfolio.sh`
 
 ## Data Schema
 
-The application's data schema manages the following entities:
-- Accounts - brokerage accounts where stocks and ETFs are held
-- Assets - investment assets: stocks, ETFs, mutual funds, etc.
-- Prices - asset prices quotes
-- Ledger - records of buying and selling assets
-- Mappings - saved CSV column-to-field associations used to pre-populate the CSV import mapping dialog
+The full specification is in `VERSION_2.md`; `js/schema.js` holds the DDL. Tables:
 
-Accounts table:
-- Account_ID (primary key, integer, auto incremented)
-- Account (text, account number or alphanumeric identifier)
-- Name (text)
-- Cash (amount of cash held in the account, float)
-- Last_Updated (datetime stamp when account's ledger was last updated)
-- Currency (text, default USD)
-- Active (flag whether the account is active or not)
+- **Info** — one row, `Schema_Version` (text, `'2.0'`). Set by `DB.createNew()`. `DB.loadFromBytes()` refuses files without an Info table (pre-2.0, no migration) or with a newer version; future 2.x schema changes add upgrade steps in `db.js` `_checkVersion()` (versions are compared numerically per dotted part).
+- **Accounts** — Account_ID, Account, Name, Cash, Last_Updated, Currency, Active. Cash is maintained incrementally by the engine (Amount of Type Cash/Trade transactions) and can also be edited in the Accounts view.
+- **Assets** — Symbol (PK), Description, Type (Stock/ETF/MF), Category, Theme, Active. No Notes column (moved to Notes). No FK from Transactions/Ledger: assets are created after the transactions and ledger entries.
+- **Notes** — Note_ID, Symbol, Timestamp, Note. History of asset notes; the Assets view shows the latest.
+- **Prices** — Date (`YYYY-MM-DD`), Symbol, Price, Currency, Valid. One daily closing price per symbol and date (`UNIQUE(Symbol, Date)`), written with an upsert (`_upsertPrice()` in `app.js`).
+- **Transactions** — Transaction_ID, Account_ID, Date (`YYYY-MM-DD`), Type (Cash | Trade | Record | Other), Category (Equity | Option | Dividend | Fee | Interest | Margin | Tax | Transfer | Other), Effect (Trade | Cash | Other | Distribution | Split | Merger | Reinvestment | Snapshot), Symbol (equity ticker or canonical option symbol; NULL for cash-only), Quantity, Price, Amount (signed cash effect: + received, − paid), Currency, Description (from the Action column), Hash, Timestamp (entry time), Valid.
+- **Ledger** — Holding_ID, Parent_ID, Transaction_ID, Timestamp, Account_ID, Symbol, Quantity, Cost_Basis, Currency, Active. Current snapshot of equity positions: one active entry per account + symbol (partial unique index). Options are not in the Ledger.
+- **Options** — Option_ID, Parent_ID, Transaction_ID, Timestamp, Account_ID, Symbol, Asset, Expiration_Date, Strike, Quantity (contracts, negative = written), Cost_Basis (total; premium paid +, received −), Currency, Active. Same model as the Ledger. Options are tracked, not valued.
+- **Mappings** — Mapping_ID, Header_Hash, Source, Target, Pattern; unique per Header_Hash + Source. Source is a field key: Account | Name | Date | Action | Symbol | Description | Quantity | Price | Amount | CostBasis | CurrentValue | Currency.
+- **Rules** — Rule_ID, Rule_Order, Pattern, Case_Sensitive, Symbol_Required, Category, Effect (Ignore | Trade | Cash | Other | Distribution | Split | Merger | Reinvestment), Sign, Description, Active. 21 rules are seeded by `createNew()` from `RULES_SEED`.
+- Views: **v_latest_price** (Symbol, Price, Date — latest valid price per symbol) and **v_holdings** (Symbol, Quantity, Cost_Basis — active Ledger entries with Quantity ≠ 0, summed per symbol). Use them instead of re-writing the latest-price/holdings subqueries.
 
-Assets table:
-- Symbol (stock or ETF symbol, primary key)
-- Description (text)
-- Type (vocabulary: Stock, ETF, MF)
-- Category (text)
-- Theme (text, free-form user-assigned grouping, e.g. "AI", "Dividend Growth")
-- Notes (text, free-form user notes)
-- Active (flag whether the asset is active or not)
+### Transaction effects and the Ledger (`js/engine.js`)
 
-Prices table:
-- Timestamp (datetime stamp of the price quote `YYYY-MM-DD HH:MM:SS`, indexed)
-- Symbol (stock or ETF symbol, foreign key to Assets)
-- Price (price per share, float)
-- Currency (text, default USD)
-- Valid (flag whether the price quote is valid, default is yes, invalid price quotes are not shown/considered)
+Each transaction's Effect (copied from the matched rule; `Snapshot` for Import Holdings) determines its Type and how it is applied (`Engine.EFFECT_TYPE`, `Engine.applyTransaction()`):
 
-Ledger table:
-- Transaction_Hash (primary key, hash value computed from account, symbol, quantity, and price)
-- Timestamp (datetime stamp of the transaction `YYYY-MM-DD HH:MM:SS`, indexed)
-- Account_ID (foreign key to Accounts table, indexed)
-- Symbol (stock or ETF symbol, foreign key to Assets)
-- Quantity (number of shares bought/sold, float)
-- Price (price per share, float)
-- Currency (text, default USD)
-- Valid (flag whether the transaction is valid, default is yes, invalid transactions are not shown/considered)
+| Effect | Type | Ledger / Options | Cash |
+|---|---|---|---|
+| Trade, Reinvestment | Trade | apply the arithmetic below | + Amount |
+| Cash | Cash | — | + Amount |
+| Other | Other | — | — |
+| Distribution | Record | q + Δq, cost kept | Amount 0 |
+| Split | Record | q = Δq (replaces), cost kept | Amount 0 |
+| Merger | Other | — (fixed by hand in the Ledger view) | Amount 0 |
+| Snapshot | Record | set quantity and cost from the file (cost = quantity × unit price, × 100 for options) | — |
 
-Mappings table:
-- Mapping_ID (primary key, integer, auto incremented)
-- Source (transaction field key, unique: Account | Name | Date | Symbol | Description | Quantity | Price | CostBasis | Currency)
-- Target (CSV column name from the source file)
-- Pattern (optional regex; if set, applied to the source value — first capture group used, or full match if no group)
+Ledger/Options arithmetic (`Engine.nextPosition(q, C, txn)`): buy or add to a position → `q+Δq`, `C + (−Amount)` (cost incl. fees); reduce → `q+Δq`, `C × (q+Δq)/q` (average cost); crossing zero → the closing part removes the basis, the opening part starts a new basis at the transaction's pro-rata Amount. Every change supersedes the active entry (old entry `Active=0`, new entry with `Parent_ID` = old entry and `Transaction_ID`); manual edits have `Transaction_ID` NULL. Entries with quantity 0 stay active (until a later transaction for the pair supersedes them) but are excluded by `v_holdings`, the Portfolio/Ledger/Options views, Update Prices and reports.
+
+- **Edit** (`Engine.editTransaction(old, changes)`): if the active entry of the pair references the edited transaction, a new entry = its Parent + the edited transaction; otherwise the edited transaction is applied in full (returns `{ warning: true }`, the UI warns that a rebuild may be needed). Cash changes by the Amount delta.
+- **Delete** (`Engine.deleteTransaction`): `Valid=0` and the Amount is reversed on cash; Ledger/Options unchanged (the UI warns first when `Engine.isReferenced()`).
+- **Rebuild** (`Engine.rebuildAccount(accountId)`, Ledger view button): replays the account's valid Trade/Record transactions by Date and supersedes all Ledger/Options entries (manual edits are lost).
+- Option symbols: canonical `<Ticker><YYYY><MM><DD><C|P><Strike>` (e.g. `NVDA20270115C360`, `NVDA20270115C182.5`). `Engine.normalizeOption()` also accepts Fidelity (`-GLD260821C515`), OCC (`NVDA270115C00360000`) and Schwab (`NVDA 01/15/2027 360.00 C`) formats; options use a ×100 multiplier when Amount is computed.
+- Amount (`Engine.resolveAmount`): the file's Amount when available, else `−Quantity × Price` (× 100 for options); `Sign` forces the sign; Distribution/Split/Merger/Snapshot are always 0.
+- Hash (`Engine.hash`): account, date, symbol, quantity, price and amount.
+- Callers wrap engine writes in `DB.transaction(fn)` (BEGIN/COMMIT, ROLLBACK on error; nested calls join; async functions supported).
 
 ---
 
 ## Inputs
 
-Accounts are populated by the user and only through the user interface. 
+Accounts are entered in the Accounts view. Positions and transactions come from CSV imports or manual entry; assets are created (Yahoo Finance lookup) after the transactions and ledger entries that reference them. Neither import writes to Prices; after an import the user is offered Tools > Update prices.
 
-Assets are populated when a first ledger transaction for the asset is entered. 
+### CSV parsing and column mapping (shared)
 
-Price quotes are populated when new asset transactions are entered or retrieved from Yahoo finance using their MCP server upon user's request to update the quotes.
+- `Import.parseCsv(text)`: strips a BOM, discards empty rows before the header and blank rows, tolerates a trailing comma (extra empty cell), handles quoted fields with `""` escapes.
+- The header row is hashed (`Import.headerHash`, BOM stripped, names trimmed). The mapping dialog is pre-populated from the Mappings rows of that **Header_Hash**; fields with no saved row for that hash (a new layout, or a field added later such as CurrentValue) are pre-selected by matching column names such as "Price ($)" → Price; confirming it upserts each Source → Target mapping for that hash. Each field has an optional extract regex (first capture group, or the full match).
+- Row preparation (`Import.prepareRows`): trailing rows whose column count differs from the header — or, for transaction files, whose Date does not parse — are dropped (broker disclaimers); transaction rows are sorted by date, earliest first (same-date rows keep file order, reversed for newest-first files).
+- Numbers accept `$`, `,`, `%`, `+` and `(123.45)`; dates accept `YYYY-MM-DD` and `MM/DD/YYYY` (the first date in the cell, e.g. "09/23/2026 as of 09/22/2026").
+- Accounts are resolved from the Account/Name columns when mapped, otherwise one account is picked for the file.
 
-Ledger transactions can either be imported from a CSV file or entered manually by the user through the user interface. 
+### File > Import holdings… (positions snapshot)
 
-When importing from a CSV file, available data fields are mapped to the schema via user interface and ingested.  
+Fields: Account, Name, Date, Symbol, Description, Quantity, Price, CostBasis, CurrentValue, Currency (Symbol, Quantity and Price or Cost Basis required). The snapshot **replaces** the account's state (`Engine.applySnapshot`): for every symbol in the file a Snapshot transaction (Type Record, unit Price = cost basis / units, where an option contract counts as 100 units) sets the quantity and cost basis; active Ledger/Options entries of the account whose symbols are not in the file are deactivated. Rows whose symbol matches `^SPAXX(\*+)`, `^USD(\*+)` or `^Cash` (case sensitive) are the account's cash: their Current Value (else Quantity, else Cost Basis) is summed and the cash balance is set to the total via a Cash transaction "Opening cash balance" with Amount = total − current cash. Without cash rows the cash balance is unchanged. One transaction date per file: from the Date column if mapped, otherwise prompted.
 
-File example:
-```CSV
-Account Number,Account Name,Symbol,Description,Quantity,Last Price,Last Price Change,Current Value,Today's Gain/Loss Dollar,Today's Gain/Loss Percent,Total Gain/Loss Dollar,Total Gain/Loss Percent,Percent Of Account,Cost Basis Total,Average Cost Basis,Type
-Y123456,Account A,AIRR,FIRST TR EXCHANGE TRADED FD VI RBA AMERN INDL RENAISSANCE ETF,2000,$133.25,+$2.35,$266500.00,+$4700.00,+1.79%,+$81717.21,+44.22%,5.26%,$184782.79,$92.39,Margin,
-X45789,Account B,AMZN,AMAZON.COM INC,2600,$232.79,-$11.60,$605254.00,-$30160.00,-4.75%,+$325514.84,+116.36%,11.95%,$279739.16,$107.59,Margin,
-```
+### File > Import transactions…
 
-CSV import uses a generic column-mapping dialog instead of hardcoded column names:
-
-1. The file is parsed to extract the header row (column names).
-2. Existing mappings are loaded from the `Mappings` table (keyed by Source column name).
-3. A **CSV Column Mapping** dialog is shown with one row per transaction field (Account, Name, Date, Symbol, Description, Quantity, Price, Cost Basis, Currency). Each row has:
-   - **Transaction Field** — fixed label (read-only)
-   - **CSV Column** — dropdown: `— none —` + all column headers from the file
-   - **Extract Pattern** — optional regex; if provided, the first capture group is used as the value (full match used if no capture group)
-4. The dialog pre-populates dropdowns and patterns from the Mappings table (keyed by transaction field name: `Source` = field key, `Target` = CSV column name). If a saved column no longer exists in the current file, the dropdown resets to `— none —`.
-5. The Import button shows an inline error unless Symbol, Quantity, and at least one of Price or Cost Basis are mapped to a CSV column.
-6. On Import: mappings are saved back to the Mappings table (upsert by Source), then the user is asked to select an account, and transactions are inserted using the mapped field values.
-
-Assets table field mapping (resolved at runtime from Mappings table):
-- Symbol <- column(s) mapped to Symbol
-- Description <- column(s) mapped to Description
-- Category <- value retrieved from Yahoo Finance MCP service, see the definition below
-- Type <- value retrieved from Yahoo Finance MCP service, see the definition below
-
-Prices table field mapping (resolved at runtime from Mappings table):
-- Timestamp <- column(s) mapped to Date, normalised to `YYYY-MM-DD HH:MM:SS`; defaults to current timestamp if unmapped
-- Symbol <- column(s) mapped to Symbol
-- Price <- column mapped to Price; if absent, derived as `CostBasis / |Quantity|`
-- Currency <- column mapped to Currency, or USD if unmapped
-
-Ledger table field mapping (resolved at runtime from Mappings table):
-- Transaction_Hash <- computed from account, symbol, quantity, and price
-- Timestamp <- column(s) mapped to Date, normalised to `YYYY-MM-DD HH:MM:SS`; defaults to current timestamp if unmapped
-- Account_ID <- resolved from the column(s) mapped to Account/Name
-- Symbol <- column(s) mapped to Symbol
-- Quantity <- column(s) mapped to Quantity
-- Price <- column mapped to Price; if absent, derived as `CostBasis / |Quantity|`
-- Currency <- column mapped to Currency, or USD if unmapped
-
-## Importing Logic
-
-The Import command performs the following logical steps:
-
-1. Displays the column mapping dialog to establish column to field mapping. Uses records from the Mappings table to prepopulate the dialog and updates the Mappings table following user's input.
-2. If there is no CSV column with the account info, asks user to select the account.
-3. **Asset enrichment pre-pass** — before inserting any rows, a single pass over the CSV collects every unique symbol not already present in the Assets table. An "Updating Assets" progress dialog (identical in style to the Update Prices dialog) is shown, and `App.ensureAsset()` is called for each new symbol with a 0.5 s delay between calls to avoid Yahoo Finance throttling. If all symbols are already known, this step is skipped entirely. After this step the main loop's `ensureAsset()` calls are instant no-ops.
-4. Each new ledger record sourced is used to populate three tables. The Assets table is populated first if a new asset is encountered. For each new asset the Prices table is updated to record the transaction price as the baseline. Then each ledger record is inserted into the Ledger table with a unique transaction_hash computed from four values: account, symbol, quantity, and price.
-5. After all rows are processed, the Cash balance of each affected account is updated: `Cash = ROUND(Cash + Σ(-qty × price), 2)`. Positive quantity (buy) decreases cash; negative quantity (sale) increases cash. `Last_Updated` is set to the current timestamp. Only successfully inserted rows (not duplicates) contribute to the delta.
-
+Fields: Account, Name, Date, Action, Symbol, Description, Quantity, Price, Amount, Currency (Date, Action, Symbol, Quantity and Amount or Price required). `Import.processTransactions` (inside `DB.transaction`):
+1. Each row's Action is classified by the active Rules (`Engine.classify`), in Rule_Order, first match wins; rules with Symbol_Required are skipped for rows without a symbol. `Asset` category resolves to Option or Equity from the symbol.
+2. Effect Ignore → counted as ignored; no matching rule → listed as unrecognized (not stored; re-importing after adding a rule picks them up).
+3. For Trade/Reinvestment rows whose Quantity has the same sign as the Amount (e.g. Schwab sells), the quantity is negated.
+4. Amount is resolved, the Hash computed, and the row skipped as a duplicate when the hash matches a transaction recorded **before the import started** (identical rows within one file are all imported).
+5. The transaction is recorded and applied (`Engine.record`). Rows dated before the latest existing transaction of the same account + symbol are listed as "predating" (the ledger may need a rebuild).
+6. A summary dialog shows Imported / Ignored / Duplicates / Unrecognized (listed) / predating rows / asset lookup failures.
 
 ---
 
@@ -227,17 +185,21 @@ The Import command performs the following logical steps:
 
 The application UI is organized as a menu strip and a collection of horizontal tabs. The menu strip contains the following submenus and commands therein:
 File/
-- New
-- Open...
-- Import...
-- Export...
-- Save...
+- New portfolio
+- Open portfolio...
+- Import holdings...
+- Import transactions...
+- Export portfolio...
+- Save portfolio...
 View/
 - Portfolio
 - Accounts
 - Assets
 - Prices
 - Transactions
+- Ledger
+- Options
+- Rules
 Analyze/
 - Portfolio  (opens an Analysis tab: portfolio value grouped by Theme)
 - Account    (prompts to select one account, opens an Analysis tab scoped to that account's assets — same Theme breakdown as Analyze/Portfolio)
@@ -249,13 +211,13 @@ Tools/
 - Update prices...
 - Query database...
 
-The New command creates a new database in memory with empty tables. 
+The New portfolio command creates a new (v2) database in memory with empty tables, the Info row and the seeded Rules.
 
-The Open command loads a previously saved database from a local file.
+The Open portfolio command loads a previously saved database from a local file; databases created before version 2.0 are refused and the current database stays open.
 
-The Import command imports transactions from a CSV file.
+The Import holdings command imports a positions snapshot, the Import transactions command imports a transaction history (see Inputs above).
 
-The Export command exports the current portfolio holdings as a CSV file named `portfolio_YYYY-MM-DD.csv`. Columns in order: Symbol, Quantity, Value, %Portfolio (from the Portfolio tab aggregation), Description, Type, Category, Notes (from the Assets table). Only symbols with a positive net quantity are included. The save picker opens in the same folder as the last database file.
+The Export portfolio command exports the current portfolio holdings as a CSV file named `portfolio_YYYY-MM-DD.csv`. Columns in order: Symbol, Quantity, Value, %Portfolio (from `v_holdings` and `v_latest_price`), Description, Type, Category, Notes (the latest note from the Notes table). Only symbols with a positive net quantity are included. The save picker opens in the same folder as the last database file.
 
 The Save command saves in-memory database into a local file. The prefix prompt is pre-filled with the prefix of the last opened or saved file (e.g. "portfolio"); the save dialog opens in the same folder as that file. User may change the prefix; the application automatically adds a timestamp suffix (e.g. _202606121605) and the .db extension.
 
@@ -271,7 +233,7 @@ The Analyze/Account command first shows a Select Account dialog (active accounts
 
 The Analyze/Assets command prompts for one or more ticker symbols, then opens a new Analysis tab with a side-by-side trend-analysis report per symbol (moving averages, RSI, momentum slopes, fundamentals) — see "Asset Analysis (Analyze > Assets)" under the Analysis Tab section below.
 
-The Portfolio, Accounts, Assets, Prices, and Transaction commands open new Portfolio, Accounts, Assets, Prices, and Transactions tabs respectively. See the definitions of these tabs below.
+The Portfolio, Accounts, Assets, Prices, Transactions, Ledger, Options and Rules commands open the corresponding tabs. See the definitions of these tabs below. **All tabs are closeable**; when the last tab is closed an empty-state message (`#tab-empty`) is shown.
 
 The tab strip (`#tab-strip`) is a flex row containing a scrollable `#tab-bar` (tabs append here left-to-right in open order) and a Refresh button (`#tab-refresh`) anchored at the right end outside the scrollable area. Clicking the Refresh button re-loads data for the currently active tab (calls the appropriate module's `refresh()` function; Query tabs have no auto-refresh since the user controls execution).
 
@@ -283,64 +245,57 @@ Each form facilitates display of the additional data for the selected data recor
 
 All forms use a 3-column layout: left column (45% width) with up to 4 fields, middle column (45% width) with additional fields, and right column (10% width) containing action buttons arranged vertically — New at the top, Accept at the bottom, other buttons in between.
 
-Each Analyze tab has a dedicated content which will be defined later.
-
 ### The Portfolio Tab
 
-When the application starts and the database file is loaded, the application displays the "Portfolio" tab. The Portfolio tab renders an aggregate view of all the Ledger transactions grouped by the symbol. The table object displays the following columns in order: Symbol (asset symbol, hyperlink), Quantity (sum of quantities of all valid ledger transactions for this symbol), Price (latest asset price from the Prices table), Value (total value of owned shares), Gain/Loss (total gained or lost value computed based on the ledger record prices and the latest price known), % Gain/Loss (gain/loss as a percentage of cost basis: `GainLoss / CostBasis × 100`), % Portfolio (percent of the total portfolio value associated with the symbol), Action (an "Analyze" button per row).
+When the application starts the "Portfolio" tab is displayed. It shows the current positions from the **active Ledger entries** (quantity ≠ 0) grouped by symbol, valued at the latest price (`v_latest_price`). Columns in order: Symbol (hyperlink), Quantity, Price, Value, Gain/Loss (`Value − Cost_Basis`), % Gain/Loss (`GainLoss / |Cost_Basis| × 100`; the absolute value keeps short positions' sign meaningful), % Portfolio, Action (an "Analyze" button per row). Cost basis is the Ledger's `Cost_Basis` (average cost) — the v1 FIFO helper `_computeCostBasisMap()` no longer exists. Options are not shown.
 
-`CostBasis` here is the **remaining open position's** cost, computed via FIFO lot matching (`_computeCostBasisMap()` in `app.js`) rather than a naive `SUM(Quantity × Price)` across every historical Ledger row for the symbol. The naive sum is wrong whenever a symbol has a prior fully-closed round trip (bought, then later fully sold) at a different price than it was later re-bought at: that closed round trip's net cash flow equals `-RealizedGain`, which would otherwise bleed into (and badly distort) the cost basis of unrelated shares purchased afterward — e.g. two fresh tranches bought at ~$200 with a current price of ~$199.9 (an unrealized loss of well under $1,000) could incorrectly show a $10,000+ loss if an unrelated earlier round trip on the same symbol happened to close at a large realized loss. FIFO matching walks each symbol's transactions in chronological order, consuming the oldest open buy lot(s) first whenever a sell occurs, so a fully-closed round trip nets its lot(s) away to zero and contributes nothing — realized or otherwise — to the cost basis used for `Gain/Loss` and `% Gain/Loss`. Both the Portfolio tab (`tab-portfolio.js`) and the Reports tab's `% Total G/L` column (`tab-reports.js`) share this same helper.
+Clicking a Symbol opens a **Holdings** drill-down tab (`PortfolioTab.openHoldings(symbol, accountId)`, ids `hld-N`): one row per account holding the symbol — Account (hyperlink → Transactions tab filtered by account + symbol), Quantity, Avg Cost (`Cost_Basis / Quantity`), Cost Basis, Price, Value, Gain/Loss, % Gain/Loss — with a summary strip. An account-scoped Portfolio tab limits the drill-down to that account.
 
-Symbol works as a hyperlink — clicking it opens a Transactions tab filtered by that symbol. When the Portfolio tab is scoped to a specific account the filter includes both symbol and accountId; for the all-accounts view only the symbol is used.
+The Action column follows the Money app's `.act-btn` convention: a column-level `cellClick` handler checks `e.target.classList.contains('act-btn')`, then calls `AnalysisTab.openAssetsFor(symbol)` (the Analyze > Assets report for that one symbol).
 
-The Action column follows the same pattern as the Money app's Transactions tab Action column (`../Money/js/tab-transactions.js`'s `actionsFormatter`/`.act-btn` convention, ported into `app.css`): a Tabulator column-level `cellClick` handler checks `e.target.classList.contains('act-btn')` before acting (so clicks on cell padding outside the button are ignored), then calls `AnalysisTab.openAssetsFor(symbol)` — the same Analyze > Assets trend-analysis report as the menu command, but run directly for that one symbol, skipping the "enter symbols" prompt dialog. `AnalysisTab.openAssets()` (the menu command) and `openAssetsFor()` (this button) both funnel into a shared private `_openAssetsForSymbols(symbols)` so the tab-opening/rendering logic isn't duplicated.
+The form zone shows:
 
-The form on the Portfolio tab is different from all other forms and does not represent a detailed view/edit for the selected tabulator record. Instead the form zone shows two elements stacked vertically:
+1. **Total portfolio value** — "Total Value: $X.XX (N)", N = number of rows. The total is the sum of position values plus the cash of the included accounts, except for a Theme-filtered tab (`PortfolioTab.open(accountId, theme)`), where cash is omitted. `% Portfolio` uses the same total as denominator.
+2. **Transaction input** — supported formats (`PortfolioTab.parseEntry`; the v1 `@ price` / `at price` forms are no longer accepted):
+   - `+100 AAPL $150` / `-50 MSFT $200` (sign determines buy/sell), optional date: `+1000 AAPL $350 2026-09-30`
+   - `buy|bought|sell|sold N [shares of] SYMBOL $PRICE [YYYY-MM-DD]`
+   - `sell all MSFT $291.5` / `buy all …` — `all` resolves to the quantity held per the active Ledger (or Options) entries, account-scoped when the tab is
+   - option symbols in canonical form, e.g. `-2 NVDA20270115C360 $3.20` (Amount = −Quantity × Price × 100)
 
-1. **Total portfolio value** — a read-only line displaying "Total Value: $X.XX (N)", where N is the count of distinct assets (table rows — i.e. distinct symbols with a positive net quantity) in the current tab's scope. The dollar total is the sum of all position values (Quantity × Price) for the current tab's scope **plus** the cash balance of the included accounts, but only when the tab is *not* Theme-filtered: for the all-accounts tab, cash is summed across all active accounts; for an account-scoped tab, only that account's cash is included; for a **Theme-filtered** tab (`PortfolioTab.open(accountId, theme)` with `theme` set — see the Analysis Tab section), cash is omitted entirely since it has no Theme of its own, and the total is just the sum of the Theme's displayed rows. Updated automatically on every data refresh. The `% Portfolio` column always uses this same total as its denominator, so it reads 100% total across whatever rows are actually shown, cash-inclusive only when the view is unfiltered by Theme.
-2. **Transaction input** — a single text field where the user can enter new ledger transactions. Supported formats:
-   - `+100 AAPL @ 150` or `-50 MSFT @ 200` (sign prefix determines buy/sell)
-   - `buy 100 AAPL at 150` / `bought 100 AAPL at 150` (positive quantity)
-   - `sell 50 MSFT @ 200` / `sold 50 MSFT at 200` (negative quantity)
-   - `sell all MSFT @ 291.5` / `buy all AAPL at 150` — `all` resolves to the current net quantity owned per the Ledger; for an account-scoped tab the sum is limited to that account, for the all-accounts tab it sums across all accounts
+   Unknown equity symbols are validated with `YahooFinance.getQuote()`; for equity sales the Account selector only lists accounts holding enough shares. The confirmation dialog has Account, Date (default today), Symbol, Quantity, Price, Currency. OK records a Trade transaction through `Engine.record` (same path as imports: Ledger/Options update and cash change), then creates the asset if needed.
 
-   When the user hits Enter, the input is parsed and the following steps run before the confirmation dialog is shown:
-   - **Symbol validation** — if the symbol is not already in the Assets table, `YahooFinance.getQuote()` is called. If the call throws or returns no price data (`regularMarketPrice` and `regularMarketPreviousClose` both absent), an error dialog is shown asking the user to correct the transaction, and the flow stops.
-   - **Account filtering for sells** — the Account selector in the confirmation dialog is populated only with accounts that hold at least the requested quantity of the symbol (per the Ledger). If no account has sufficient holdings, an error is shown instead of the dialog.
-
-   The confirmation dialog contains: Account (selector), Symbol, Quantity (pre-filled with the resolved number when `all` was used), Price, Currency (default USD). All fields are required. User clicks OK to commit the transaction (same logic as import: ensures asset exists, seeds a price record if none, inserts Ledger row, updates Cash and Last_Updated on the account) or Cancel to abort. On success the Portfolio tab refreshes.
-
-If user enters a negative quantity of shares, the application also updates the Cash field of the Accounts table record by the the amount of sale. For example, if user enters "-100 MSFT @ 291.5" or "sold 100 MSFT at 291.5", the Cash balance of the selected account should be increased by 29,500. If user enteres a positive quantity of share, the Cash balance should be decreased by the total amount of the new ledger record. The Last_Updated field of the selectd account should be updated with the current date.
-
-Multiple Portfolio tabs may be open simultaneously (one per account). Each tab is independent with its own table and form state. Form element IDs are scoped per instance using the pattern `ft-<tabId>-<fieldName>` to prevent conflicts.
+Multiple Portfolio tabs may be open simultaneously (one per account / theme). Form element IDs are scoped per instance (`<tabId>-…`).
 
 ### The Accounts Tab
 
-The Accounts tab renders all records from the Accounts table where Active flag is set. The table object displays the following fields in order: Name, Balance, Cash, Last Updated. The Name column works as a hyperlink — clicking it opens a new Portfolio tab filtered to that account.
-
-Balance is a computed column: `ROUND(SUM(net_quantity × latest_price) + Cash, 2)` where net_quantity per symbol is derived from all valid Ledger rows for the account, and latest_price comes from the most recent valid Prices row per symbol (same `GROUP BY Symbol HAVING Timestamp = MAX(Timestamp)` pattern used elsewhere). Balance updates automatically whenever any Ledger or Price data changes (via `App.onDataChanged()` → `refreshAll()`), and can also be refreshed manually with the Refresh button in the tab strip.
-
-The form on the Accounts tab displays the following fields for the selected account. Left column: Account, Name; Middle column: Cash + Currency (same line), Active. Each of the displayed fields can be edited. 
+Active accounts with columns Name (hyperlink → Portfolio tab for the account), Balance, Cash, Last Updated. Balance = `ROUND(SUM(Ledger.Quantity × latest price) + Cash, 2)` over the account's active Ledger entries (`v_latest_price`). Form: left Account, Name; middle Cash + Currency, Active. Deleting (deactivating) an account is refused while it has valid transactions.
 
 ### The Assets Tab
 
-The Assets tab renders all records from the Assets table where Active flag is set. The table object displays the following fields in order: Symbol, Quantity, Description, Type, Theme, Category, Notes. Quantity is the total net shares owned across all accounts (sum of all valid Ledger rows for the symbol). Symbol and Type columns are rendered at half the width of Description, Theme, Category, and Notes (`widthGrow: 1` vs `widthGrow: 2`). Each symbol works as a hyperlink — clicking it opens a new Transactions tab filtered to that asset.
-
-The form on the Assets tab displays the following fields for the selected asset. Left column: Symbol, Description, Notes; Middle column: Type (dropdown box), Category, Theme. Each of the displayed fields can be edited. The Theme field is a free-text input with a custom autocomplete dropdown (`.ac-wrap` / `.ac-list` / `.ac-item` / `.ac-active` in `app.css`): on each keystroke it queries `SELECT DISTINCT Theme FROM Assets WHERE Theme LIKE '<text>%' AND Theme IS NOT NULL AND Theme <> '' ORDER BY Theme LIMIT 10` and renders matches as a dropdown positioned below the input; clicking a match (via `mousedown`, to fire before the input's `blur`) or navigating with Arrow Up/Down + Enter fills the field, Escape closes the dropdown, and losing focus closes it after a short delay. This is a reusable pattern (`_attachThemeAutocomplete` / `_addAcKeyboard` in `tab-assets.js`) — the same `.ac-*` CSS classes are intended for any future free-text field that should suggest from existing distinct values.
+Active assets with columns Symbol (hyperlink → Transactions tab for the symbol), Quantity (from `v_holdings`), Description, Type, Theme, Category, Notes (latest note), Action. The Action column shows a **Notes** button when the asset has notes; it opens a scrollable popup with all notes in chronological order (`_showNotes`). Form: left Symbol, Description, Note; middle Type, Category, Theme (with the `.ac-*` autocomplete, `_attachThemeAutocomplete` / `_addAcKeyboard`). Accepting a new or changed Note inserts a row in the Notes table (the history is never overwritten). Deleting is refused while the asset has valid transactions, active ledger entries or prices.
 
 ### The Prices Tab
 
-The Prices tab renders the most recent record from each unique Symbol from the Prices table. The table object displays the following fields in order: Symbol, Description (from the Assets table), Price, Timestamp (timestamp of the most recent price quote available). Each symbol works as a hyperlink - when user click on the symbol a new Transactions tab is opened that display transactions for this asset only.
-
-The form on the Prices tab displays the following fields for the selected asset. Left column: Symbol, Description; Middle column: Price + Currency (on the same line). Right column buttons: Update (top), Accept (bottom). Only the Price field is editable. The Update button (enabled after row selection) calls `YahooFinance.getQuote` for the selected symbol using `regularMarketPrice ?? regularMarketPreviousClose`, populates the Price field, and enables Accept — without writing to the database. If users enters or updates a price value and clicks Accept, a new record is added to the Prices table with the current timestamp. The tabulator view is updated to reflect the price changes.
+The latest price per symbol (`v_latest_price`): Symbol (hyperlink → Transactions), Description, Price, Date. Form: Symbol, Description; Price + Currency; buttons Update (fetches `regularMarketPrice ?? regularMarketPreviousClose` via `getQuote`, does not save) and Accept (upserts the price for today's date).
 
 ### The Transactions Tab
 
-Multiple Transactions tabs may be open simultaneously (one per account, symbol, or time frame). Each tab is independent with its own table and form state. Form element IDs are scoped per instance using the pattern `ft-<tabId>-<fieldName>` to prevent conflicts.
+Multi-instance (`txn-N`), built on the **Transactions table** (valid rows), optionally pre-filtered by account and/or symbol (label: symbol, else account name). Columns: Date, Account, Type, Category, Symbol, Quantity, Price, Amount, Description; natural order Date, Transaction_ID. Form: left Account, Date (`<input type="date">`), Effect / Category, Description; middle Symbol, Quantity, Price + Currency, Amount (blank = −Quantity × Price). Buttons: New, Delete, Accept.
+- New + Accept → `Engine.record` (Category `Asset` resolves to Equity/Option).
+- Accept on an existing row → `Engine.editTransaction`; when it reports `warning`, an alert explains that the edited transaction was applied in full and the ledger might need a rebuild.
+- Delete (or the Delete key) → `Engine.deleteTransaction`; when the transaction is referenced by any Ledger/Options entry the confirmation warns that the ledger might need to be rebuilt.
 
-Each Transactions tab is named after its primary filter: symbol takes precedence over account name — so a tab filtered by both symbol and accountId is labelled with the symbol. A tab filtered by accountId only is labelled with the account name. The Transactions tab renders all ledger transactions for the selected account(s) where Valid flag is set to true. The data for the Transactions tab are assembled by joining Ledger and Accounts tables to resolve foreign keys. The table objects displays the following values in order: Name, Type(Buy or Sale based on the quantity sign: positive or negative), Timestamp, Symbol, Quantity, Price, Value(total value of the transaction). The data in the Transactions tab can be pre-filtered by a specific Account or Symbol (e.g. see navigation from the Accounts or Assets tabs). In that case only the transactions matching the specified Account ID or Symbol are displayed. By default, the transactions are sorted by Timestamp in an ascending order.
+### The Ledger Tab
 
-The form on the Transactions tab uses a 3-column layout. Left column (top to bottom): Account, Name, Timestamp (`<input type="datetime-local">`). Middle column (top to bottom): Symbol, Quantity, Price + Currency (on the same line). The form buttons are in the right column: New (top), Delete (middle), Accept (bottom). The New button resets the form. The Delete button invalidates the transaction and hides it from the view/consideration. The Accept button saves any edited form data including adding a new ledger transaction.
+Singleton (`led`, View > Ledger) — the v1 Transactions tab repurposed (`tab-ledger.js`). Shows the **active** Ledger entries with quantity ≠ 0: Account, Symbol (hyperlink → Transactions for account + symbol), Quantity, Price (`Cost_Basis / Quantity`), Cost Basis. Form: left Account, Symbol (editable only for New); middle Quantity, Cost Basis + Currency. Buttons: New, Deactivate (also the Delete key), Rebuild, Accept. Accept supersedes the entry as a manual edit (`Transaction_ID` NULL); Deactivate sets `Active=0`; Rebuild asks for confirmation (warning that manual edits are discarded) and runs `Engine.rebuildAccount` for the selected entry's account.
+
+### The Options Tab
+
+Singleton (`opt`, View > Options): active option entries with quantity ≠ 0 and `Expiration_Date >= today`: Account, Symbol, Asset, Expiration Date, Strike, Quantity. Same form and buttons as the Ledger view (New, Deactivate, Accept; no Rebuild — the account rebuild also recalculates options). Options are not included in any portfolio value.
+
+### The Rules Tab
+
+Singleton (`rul`, View > Rules): active import rules ordered by Rule_Order: Order, Pattern, Case Sensitive, Symbol Required, Category, Effect, Sign, Description. Form: left Pattern, Description, Matching (Case Sensitive and Symbol Required checkboxes); middle Order, Category, Effect, Sign. Accept validates the regex (inline error); Delete sets `Active=0`. Rule changes apply to later imports only.
 
 ### The Query Tab
 
@@ -355,15 +310,15 @@ Execution is triggered by clicking Run or pressing Ctrl+Enter inside the textare
 
 Multiple Reports tabs may be open simultaneously — each invocation of Reports/Portfolio performance or Reports/Account performance opens a brand-new closeable tab (tab IDs `rpt-1`, `rpt-2`, …, counter shared across both commands), rather than reactivating a singleton. Unlike the View tabs, a Reports tab has no form zone: the panel is a table filling ~all of the space, with a summary strip anchored at the bottom.
 
-The table shows one row per active asset — positive net quantity per the Ledger, across all accounts for Portfolio performance or limited to `l.Account_ID = ?` for Account performance — with columns in order: Symbol (hyperlink — opens a Transactions tab filtered by that symbol), Quantity, Price (latest valid price from the Prices table), Value (`Quantity × Price`), % Total G/L, % Asset G/L YTD, % Asset G/L QTD.
+The table shows one row per held asset — active Ledger entries with quantity ≠ 0, across all accounts for Portfolio performance or limited to `l.Account_ID = ?` for Account performance — with columns in order: Symbol (hyperlink — opens a Transactions tab filtered by that symbol), Quantity, Price (latest valid price from the Prices table), Value (`Quantity × Price`), % Total G/L, % Asset G/L YTD, % Asset G/L QTD.
 
 **Account performance** (`ReportsTab.openAccount()`) reuses this exact same `_build`/`_computeReport` code as Portfolio performance, with an `accountId` threaded through the assets query and into `reportLabel` (resolved from the account's Name) wherever the UI previously said "Portfolio": the progress dialog title, the failure-summary dialog title, and the summary strip's "Avg {reportLabel} Performance:" label. It first prompts with a Select Account dialog (`_selectAccountDialog()` — active accounts only, same small custom `<select>` popup pattern as `AnalysisTab.openAccount()`'s account picker, alerting instead if there are no active accounts). The YTD/QTD baseline-price lookup/cache logic (`_getBaseline`) is unchanged and unparameterized by account, since a symbol's baseline price is the same regardless of which account holds it.
 
-% Total G/L is the asset's total gain/loss since acquisition, same formula as the Portfolio tab's `% Gain/Loss` column: `(Value − CostBasis) / CostBasis × 100`, where `CostBasis` is the remaining open position's FIFO-matched cost basis from `_computeCostBasisMap()` (see The Portfolio Tab section above) — not a raw `SUM(Quantity × Price)`, which would incorrectly include the realized gain/loss of any prior fully-closed round trip on that symbol. No MCP call needed for this column (unlike YTD/QTD) since it's derived entirely from local Ledger/Prices data. `—` if CostBasis is 0.
+% Total G/L is the asset's total gain/loss, same formula as the Portfolio tab's `% Gain/Loss` column: `(Value − CostBasis) / |CostBasis| × 100`, where `CostBasis` is the sum of the active Ledger entries' `Cost_Basis`. No MCP call needed for this column (unlike YTD/QTD) since it's derived entirely from local Ledger/Prices data. `—` if CostBasis is 0.
 
 For each asset, % Asset G/L YTD and % Asset G/L QTD are computed against a baseline price captured on the first market day of the current calendar year and current calendar quarter, respectively:
-1. The Prices table is checked first for a valid price already recorded for that symbol within the 9 days following the period start date (`YYYY-01-01` for YTD, `YYYY-{01,04,07,10}-01` for QTD). If found, that price is reused as the baseline (avoids re-fetching on every report run).
-2. If no cached baseline exists, `YahooFinance.getChart(symbol, periodStart, periodStart+9days, '1d')` is called; the earliest returned daily candle's `close` is taken as the baseline price and inserted into the Prices table with a timestamp derived from that candle's actual date (which may differ from `periodStart` itself, e.g. New Year's Day/weekends), so subsequent report runs hit the cache.
+1. The daily Prices are checked first for a valid price already recorded for that symbol (by `Date`) within the 9 days following the period start date (`YYYY-01-01` for YTD, `YYYY-{01,04,07,10}-01` for QTD). If found, that price is reused as the baseline (avoids re-fetching on every report run).
+2. If no cached baseline exists, `YahooFinance.getChart(symbol, periodStart, periodStart+9days, '1d')` is called; the earliest returned daily candle's `close` is taken as the baseline price and upserted into the Prices table for that candle's date (`_isoToDate`) (which may differ from `periodStart` itself, e.g. New Year's Day/weekends), so subsequent report runs hit the cache.
 3. `%Gain/Loss = (CurrentPrice − BaselinePrice) / BaselinePrice × 100`. If a baseline can't be found (new listing, delisted, MCP failure), the cell shows `—` and the asset is excluded from that period's portfolio-level average (not treated as 0%).
 
 The bottom summary strip reads **"Avg {reportLabel} Performance: Total xx%, YTD yy%, QTD zz%"** (each percentage bold and colored green/positive or red/negative) — three value-weighted averages, each `(ΣCurrentValue − ΣBaseValue) / ΣBaseValue × 100`:
@@ -383,7 +338,7 @@ Multiple Analysis tabs may be open simultaneously — each invocation of Analyze
 `.rpt-report-layout` is a **distinct class from `.rpt-layout`** (the flex-based shell already owned by the Reports/Performance tab, which has different children and sizing needs) — reusing `.rpt-layout` here would have broken that tab's Tabulator zone. All the other classes (`.rpt-header`, `.rpt-title`, `.rpt-subtitle`, `.rpt-table`, `.rpt-col-name`, `.rpt-col-num`, `.rpt-total-row`, `.rpt-empty`) are exact ports of Money's values in `app.css`, since only the Analysis tab uses them (no naming conflicts there). Percentages are formatted to 1 decimal place (`.toFixed(1)`), matching Money's report exactly, rather than the 2-decimal precision used elsewhere in this app (Portfolio/Reports tabs).
 
 The table has one row per distinct Theme (from the Assets table) plus one synthetic **Cash** row, with columns Theme, Value, %Portfolio, computed as follows:
-1. All active symbols (positive net quantity per the Ledger) are valued at `Quantity × MostRecentPrice` (latest valid row per symbol in Prices).
+1. All held symbols (active Ledger entries with quantity ≠ 0) are valued at `Quantity × MostRecentPrice` (`v_latest_price`). Symbols missing from the Assets table are grouped under "(No Theme)" (LEFT JOIN).
 2. Values are grouped and summed by the owning asset's Theme. Assets with a blank/NULL Theme are grouped together under the label **"(No Theme)"** rather than excluded, so the table still accounts for the full portfolio.
 3. Total cash across all active Accounts is added as its own **Cash** row (only shown if non-zero) — Themes apply to assets, not cash, so there's no per-theme cash split.
 4. All rows (Theme groups + Cash) are sorted together by Value descending.
@@ -425,7 +380,7 @@ Use Yahoo Finance MCP server https://gateway.mcpservers.org/yahoo-finance/mcp to
 
 When a new asset is created, use Yahoo Finance MCP server to retrieve the additional info. First, use tool  "get_quote" to retrieve "longName" and "quoteType". Use longName to populate the Description field. Use quoteType to determine asset type: if quoteType == "EQUITY" → Stock, if quoteType == "ETF" → ETF, if quoteType == "MUTUALFUND" → Mutual Fund. If the asset is Stock, use tool "quote_summary" with its module "assetProfile" to retrieve asset's "sector" and "industry" and concatenate their values to populate the Category field, e.g. if "industry": "Software - Infrastructure", and "sector": "Technology", then Category = "Technology, Software - Infrastructure". If the asset is ETF,  use tool "quote_summary" with its module "assetProfile" to retrieve asset's "category" to populate the Category field. 
 
-The Tools/Update Prices command uses Yahoo Finance MCP server's get_quote tool to update prices for all portfolio assets. For all unique symbols with a positive total quantity based on the Ledger table (no join to Assets needed since Prices no longer carries a Type column), it uses get_quote tool and inserts new record in the Price table with the current date. The latest price is taken as `regularMarketPrice ?? regularMarketPreviousClose` for all asset types. Price value should be rounded to the two decimal points before updating the Prices table. In order to handle server request throttling, `cmdUpdatePrices()` sleeps a constant 0.1 s after each get_quote call. If a call comes back as "Too Many Requests" (HTTP 429 thrown as `MCP error 429`, a JSON-RPC error, or a text tool result containing that phrase), it waits 1 s and retries the same symbol, repeating up to 15 attempts in total for that symbol; the progress dialog's detail line shows the retry count. Once the call succeeds, the remaining symbols continue at the normal 0.1 s delay. If all 15 attempts are rate-limited, the whole update is terminated: prices already inserted are kept, tabs are refreshed, and a result dialog explains that the update stopped, which symbol it stopped on, and how many symbols were left un-updated. After the progress dialog closes, if any assets failed (network error or price field absent from response), a failure summary dialog is shown listing each failed symbol and its error reason (`Dialogs.alertHtml` with a scrollable list). `App.ensureAsset()` returns `null` (asset already existed), `{ ok: true }` (success), or `{ ok: false, reason }` (failure) so callers can report failures. The shared helper `_showResultDialog(summary, failures, title)` in `app.js` renders a plain alert when there are no failures, or an HTML list when there are.
+The Tools/Update Prices command stores **daily closing prices** for all held assets (`v_holdings`: active Ledger entries with quantity ≠ 0). For each symbol it calls `YahooFinance.getChart(symbol, start, tomorrow, '1d')`, where `start` is the later of today − 1 year and the last stored price Date for the symbol (the last date is fetched again so an intraday price is replaced by the final close), and upserts one Prices row per candle (`_upsertPrice`, rounded to 2 decimals, date from `_isoToDate`: the UTC calendar date of the candle). Throttling: 0.1 s after each call; "Too Many Requests" (HTTP 429, JSON-RPC error or text result) waits 1 s and retries the same symbol up to 15 attempts, after which the update stops, keeps what was stored, and reports the symbol it stopped on. Failures (network error, error text, no candles) are listed in a result dialog via `_showResultDialog(summary, failures, title)`. `App.ensureAsset()` returns `null` (asset already existed), `{ ok: true }` or `{ ok: false, reason }`.
 
 ---
 
@@ -436,29 +391,29 @@ The Tools/Update Prices command uses Yahoo Finance MCP server's get_quote tool t
 - Keep all JS in `index.html` or as plain `.js` files loadable via `<script src="">` — no ES module imports from `file://` unless Chromium flags explicitly permit them
 - Prefer simplicity: this is a single-user local tool, not a web service
 - All JS objects are globals (no ES module export/import); load order in `index.html` is the dependency order
-- Timestamps in Prices and Ledger are stored as `YYYY-MM-DD HH:MM:SS` (local time) using the global helper `_nowTs()` in `app.js`; the Transactions form uses `<input type="datetime-local">` and converts via `.replace(' ','T')` ↔ `.replace('T',' ')`. Existing databases are migrated automatically on load via the private `_migrate()` helper in `db.js`, which runs before `SCHEMA_SQL`. Current migrations: rename `Date → Timestamp` in Prices and Ledger; add `Notes TEXT` column to Assets; add `Theme TEXT` column to Assets; drop `Type` column from Prices.
-- Notify open tabs of data changes via `App.onDataChanged()` — refreshes all open tabs whose `refresh` callback opted into auto-refresh. `App.Tabs.open(id, label, buildFn, opts)` accepts `opts.autoRefresh` (default `true`); tabs passing `autoRefresh: false` (currently only Reports tabs) still refresh via `refreshCurrent()` (the tab-strip Refresh button, when active) but are skipped by `refreshAll()`
+- Dates: Transactions.Date and Prices.Date are `YYYY-MM-DD` (`_todayStr()`, `_addDaysStr()`, `_isoToDate()` in `app.js`); entry timestamps (Transactions/Ledger/Options/Notes `Timestamp`) are `YYYY-MM-DD HH:MM:SS` local time via `_nowTs()`. There are no schema migrations from v1: `DB.loadFromBytes()` refuses pre-2.0 files (`DB.VersionError`) and never runs `SCHEMA_SQL` on them; upgrade steps between 2.x versions go in `_checkVersion()` in `db.js`.
+- Notify open tabs of data changes via `App.onDataChanged()` — refreshes all open tabs whose `refresh` callback opted into auto-refresh. `App.Tabs.open(id, label, buildFn, opts)` accepts `opts.refresh`, `opts.onClose` (singleton tabs reset their module state) and `opts.autoRefresh` (default `true`); every tab gets a close button; tabs passing `autoRefresh: false` (currently only Reports tabs) still refresh via `refreshCurrent()` (the tab-strip Refresh button, when active) but are skipped by `refreshAll()`
 - No welcome screen; app starts immediately with a Portfolio tab and either a loaded or new empty database
 - `App.Tabs.closeAll()` + `PortfolioTab.open()` = `_resetTabs()` — called on File > New and File > Open
 - `_lastFileHandle` (`FileSystemFileHandle`) is persisted to and loaded from IndexedDB (`PortfolioApp` / `handles` / `'dbFile'`) across Chromium restarts; updated on every successful Open or Save; on first launch with URL params it is bootstrapped by calling `showOpenFilePicker` once (silently skipped if Chromium requires a user gesture); File > Open uses `showOpenFilePicker()` with `id: 'portfolio-db'` and `startIn: _lastFileHandle` when available; File > Save uses `showSaveFilePicker()` with `id: 'portfolio-db'`, `suggestedName` pre-filled from `_lastPrefix + timestamp`, and `startIn: _lastFileHandle` when available; File > Import uses `id: 'portfolio-import'` (separate MRU folder) and `startIn: App._lastImportHandle` — note: the File System Access API does not support starting pickers at arbitrary path strings; folder memory is established via handles only
 - Saved files should go into the `data/` subfolder so `portfolio.bat` auto-detects them on next launch
-- Transactions tab supports multiple simultaneous instances; form element IDs are scoped per tab using `ft-<tabId>-<fieldName>`; access via `fld(inst, name)` helper — never use bare `getElementById('ft-*')` in that module
+- Transactions, Ledger, Options and Rules tabs scope form element IDs as `ft-<tabId>-<fieldName>`; access via the `fld(id, name)` helper — never use bare `getElementById('ft-*')` in those modules
 - Portfolio tab also supports multiple simultaneous instances (one per account); same `ft-<tabId>-<fieldName>` scoping applies
 - Window close protection uses `beforeunload` with `e.preventDefault()` + `e.returnValue = ''`; modern Chromium ignores any custom message string and shows its own native dialog — custom dialogs in `beforeunload` are not supported
-- Application version is defined as the global constant `APP_VERSION = '1.1'` at the top of `app.js`; displayed as `v{version}` prefix in the status bar (e.g. `v1.1 portfolio_202606142107.db`)
+- Application version is defined as the global constant `APP_VERSION = '2.0'` at the top of `app.js`; displayed as `v{version}` prefix in the status bar (e.g. `v2.0 portfolio_202610051200.db`). The database schema version is separate: `SCHEMA_VERSION` in `schema.js`, stored in `Info.Schema_Version`
 - Change counter: `DB.run()` increments `_changeCount` for every INSERT/UPDATE/DELETE; `DB.setChangeListener(fn)` registers a callback fired after each write; `DB.getChangeCount()` / `DB.resetChangeCount()` manage the count; `app.js` registers a listener that calls `_renderStatus()` to append `(+N)` to the status bar; count resets to 0 on `createNew()`, `loadFromBytes()`, and after a successful save
 - `DB.exportBytes()` returns the in-memory database as a `Uint8Array` for writing to a file
-- Tab IDs: singleton tabs use fixed IDs (`acc`, `ast`, `prc`); multi-instance tabs use auto-incremented IDs (`prt-1`, `prt-2`, …; `txn-1`, `txn-2`, …; `qry-1`, `qry-2`, …; `rpt-1`, `rpt-2`, …; `aly-1`, `aly-2`, …). `_stubTab()` in `app.js` is unused dead code — all three Analyze menu commands are now implemented, none remain stubs.
+- Tab IDs: singleton tabs use fixed IDs (`acc`, `ast`, `prc`, `led`, `opt`, `rul`); multi-instance tabs use auto-incremented IDs (`prt-N`, `hld-N`, `txn-N`, `qry-N`, `rpt-N`, `aly-N`).
 - Account-picker dialogs (`_selectAccountDialog()` in `tab-reports.js` and `tab-analysis.js`): a `<select>`'s `.value` is always a string, but every other `accountId` in the app comes from a `DB.query()` result and is a genuine number. Both dialogs explicitly `Number(...)` the selected value before resolving, for type consistency with every other `accountId` flow. **Note**: this was initially (incorrectly) suspected as the cause of `Report > Account performance` showing an empty table for non-default accounts — it wasn't; that turned out to be the Tabulator virtual-DOM redraw issue described below. The `Number()` coercion is still worth keeping (removes a real, if harmless, type inconsistency) but doesn't fix a rendering bug on its own.
 - **Reports tab Tabulator first-render bug**: `tab-reports.js`'s table is the only Tabulator instance in the app built with `data: []` and populated later via `.replaceData()` after an async gap (the YTD/QTD baseline-price lookups) — every other Tabulator tab gets real data synchronously at construction. Everything *outside* Tabulator (the plain-HTML summary strip below it) rendered correctly on first load, isolating the bug to Tabulator specifically; the tab-strip Refresh button "fixed" it by triggering a second, later `replaceData()` call. A `redraw(true)` immediately after the first `replaceData()` was tried first and did **not** fix it, which ruled out a virtual-DOM row-height/sizing miscalculation as the cause. The actual cause: `new Tabulator(...)` returns before the table has finished its own internal build (DOM/column setup) — calling `.replaceData()` before that completes is a documented Tabulator race, and `_build()` was doing exactly that (kicking off `_computeReport()`, and therefore the eventual `replaceData()`, immediately after construction with no guarantee Tabulator was actually ready). Fix: `_build()` now defers the initial `_computeReport(id, accountId)` call to Tabulator's `tableBuilt` event (`table.on('tableBuilt', () => _computeReport(id, accountId))`) instead of calling it right after `new Tabulator(...)`, guaranteeing the table is genuinely ready before any data is loaded into it. The `redraw(true)` after `replaceData()` in `_computeReport()` was left in place as a harmless defensive measure but is not what fixes this.
-- Transaction hash format: `${accountId}|${symbol}|${quantity}|${price}_${Math.abs(hash).toString(36)}` — used as the `Transaction_Hash` primary key for deduplication
+- Transaction hash (`Engine.hash`): `${accountId}|${date}|${symbol}|${quantity}|${price}|${amount}_${base36 hash}` stored in `Transactions.Hash` (indexed, not unique) for duplicate detection on import
 - `App._lastImportHandle` is stored on the `App` object (not a top-level variable) so `import.js` can access it
 - `YahooFinance` is a global IIFE in `app.js` with methods `getQuote(symbol)`, `getQuoteSummary(symbol, module)`, and `getChart(symbol, period1, period2, interval = '1d')` (wraps the MCP `get_chart` tool; used by the Reports tab for YTD/QTD baseline prices); it uses the MCP streamable-HTTP transport with an `initialize` → `notifications/initialized` → `tools/call` flow; the session ID is maintained across calls in the same page load. The underlying MCP server (`yahoo-finance-mcp`) exposes four tools total — `get_quote`, `search`, `get_chart`, `quote_summary` — of which `search` is not currently used by the app.
 - `Dialogs` is a global IIFE in `dialogs.js`; uses `#modal-backdrop` + `#modal-container` elements; never call `Dialogs.alert/confirm/prompt` from inside another `Dialogs.custom()` handler — use inline error elements instead; `Dialogs.alertHtml(bodyHtml, title)` accepts pre-sanitized HTML for the body (use when a formatted list is needed — callers must escape values with `_esc()` before interpolating)
-- Analyze tabs (Portfolio, Accounts, Assets under the Analyze menu) are currently stubs showing "Coming soon" — content not yet defined
+- Testing: `python tests/run_tests.py` (one-time setup: `python -m pip install --target tests/.pylib quickjs`). The tests run the real `js/*.js` in QuickJS with a `SQL.Database` stand-in backed by Python `sqlite3` (`tests/harness.py`); they cover the DB layer, engine, imports, Update Prices, script loading and SQL compilation, not the UI. Add checks to the matching `tests/test_*.js` when changing data logic; see `tests/README.md`
 - MCP call logging: every JSON response from `YahooFinance` is logged to `logs/mcp.log` in the browser's Origin Private File System (OPFS) — no user interaction required; the file is overwritten (truncated) at each app launch. Access via **Tools > Download MCP log…** (downloads as `mcp.log`) or via Chromium DevTools → Application → Storage → Origin private file system → `logs/mcp.log`. In-memory log array `_mcpLog` accumulates entries for the current session.
 - Tab panel visibility: inactive `.tab-panel` elements use `visibility: hidden` (not `display: none`) so that Tabulator's virtual renderer retains layout and `scrollTop` is preserved across tab switches. All panels are `position: absolute; inset: 0` stacked inside `#tab-content`; only the active panel gets `visibility: visible; pointer-events: auto`.
-- File > Export (`cmdExport` in `app.js`): queries the same portfolio aggregation as the Portfolio tab, joins with Assets for metadata columns, computes `%Portfolio` in JS, and writes a CSV via `showSaveFilePicker` with `id: 'portfolio-export'`.
+- File > Export (`cmdExport` in `app.js`): queries `v_holdings` + `v_latest_price` (same aggregation as the Portfolio tab), joins with Assets for metadata columns, computes `%Portfolio` in JS, and writes a CSV via `showSaveFilePicker` with `id: 'portfolio-export'`.
 
 ---
 
