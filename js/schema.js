@@ -148,6 +148,7 @@ const SCHEMA_SQL = `
 const RULES_SEED = [
   [10,  '^(JOURNALED)',                                    1, 0, 'Other',    'Ignore',       null, 'journaling transactions'],
   [20,  '^(DIVIDEND)',                                     1, 1, 'Dividend', 'Cash',         null, 'cash dividend'],
+  [25,  '^(YOU BOUGHT RSU)',                               1, 1, 'Asset',    'RSU',          null, 'recording of RSU vesting transactions'],
   [30,  '^(YOU BOUGHT)',                                   1, 1, 'Asset',    'Trade',        null, 'equity/option purchase'],
   [40,  '^(YOU SOLD)',                                     1, 1, 'Asset',    'Trade',        null, 'equity/option sale'],
   [45,  '^(REINVESTMENT).*\\((SPAXX|FDRXX|FZFXX|SWVXX)\\)', 1, 1, 'Other',    'Other',        null, 'reinvestment into a cash-like money market fund, recorded only'],

@@ -156,8 +156,16 @@ const TransactionsTab = (() => {
     async function _accept() {
       const t = _readForm();
       if (!t.Account_ID || !/^\d{4}-\d{2}-\d{2}$/.test(t.Date)) { await Dialogs.alert('Account and Date are required.'); return; }
-      const needsSymbol = ['Trade', 'Reinvestment', 'Distribution', 'Split'].includes(t.Effect);
+      const needsSymbol = ['Trade', 'Reinvestment', 'Distribution', 'Split', 'RSU'].includes(t.Effect);
       if (needsSymbol && !t.Symbol) { await Dialogs.alert(`A Symbol is required for ${t.Effect} transactions.`); return; }
+      if (t.Effect === 'RSU' && t.Price == null) {
+        // Cost basis = quantity × the closing price on the vesting date
+        t.Price = Engine.priceOn(t.Symbol, t.Date);
+        if (t.Price == null) {
+          await Dialogs.alert(`No ${t.Symbol} closing price is stored for ${t.Date}. Enter the price (Tools > Update prices only covers the last year).`);
+          return;
+        }
+      }
 
       let warning = false;
       try {

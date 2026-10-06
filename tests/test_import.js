@@ -111,3 +111,46 @@ eq([Engine.activeEntry('Options', 1, 'NVDA20270115C360').Cost_Basis,
    [-5987, 2.9935], 'option snapshot: unit price = cost basis / (contracts x 100), cost basis kept');
 eq([led(2, 'AMZN').Quantity, led(2, 'BUG')], [2600, null], 'snapshot replaces account 2');
 eq(cash(2), 1000, 'account 2 cash set from its Current Value');
+
+// Rows of accounts that are not found are counted first and never reach rule matching
+csv = Import.parseCsv('Date,Account,Action,Symbol,Quantity,Price,Amount\n' +
+  '2026-10-01,X1,Buy,ZZA,10,$5,-$50\n' +
+  '2026-10-01,X1,Mystery action,ZZA,0,,$1\n' +
+  '2026-10-01,NOPE,Mystery action,ZZB,0,,$1\n' +
+  '2026-10-01,NOPE,JOURNALED VS X,ZZB,5,,$0\n' +
+  '2026-10-01,NOPE,Buy,ZZB,1,$5,-$5\n');
+const um = { Date: m('Date'), Account: m('Account'), Action: m('Action'), Symbol: m('Symbol'),
+             Quantity: m('Quantity'), Price: m('Price'), Amount: m('Amount') };
+res = Import.processTransactions(Import.prepareRows(csv, um, true), um, row => row.vals[1] === 'X1' ? 1 : null);
+eq([res.stats.unknownAccount, res.unrecognized.length, res.stats.ignored, res.stats.imported], [3, 1, 0, 1],
+   'unknown-account rows counted before rule matching (not unrecognized, not ignored)');
+eq(res.unrecognized.map(u => u.symbol), ['ZZA'], 'only unmatched rows of known accounts are listed');
+
+// RSU rows: price from the stored daily closes on the vesting date, not from the file
+DB.run("INSERT INTO Rules (Rule_Order, Pattern, Case_Sensitive, Symbol_Required, Category, Effect) VALUES (5, '^(RSU VEST)', 1, 1, 'Asset', 'RSU')");
+DB.run("INSERT INTO Prices (Date, Symbol, Price) VALUES ('2026-09-15','RSUA',101.25)");
+csv = Import.parseCsv('Date,Action,Symbol,Quantity,Price,Amount\n' +
+  '2026-09-15,RSU VEST,RSUA,20,,\n' +
+  '2026-09-16,RSU VEST,RSUB,7,$1.00,$0\n');
+const rm = { Date: m('Date'), Action: m('Action'), Symbol: m('Symbol'), Quantity: m('Quantity'), Price: m('Price'), Amount: m('Amount') };
+rows = Import.prepareRows(csv, rm, true);
+eq(Import.rsuPriceRequests(rows, rm, () => 1), [{ symbol: 'RSUB', date: '2026-09-16' }], 'only RSU rows without a stored close need a fetch');
+const cashBeforeRsu = cash(1);
+res = Import.processTransactions(rows, rm, () => 1);
+eq([res.stats.imported, led(1, 'RSUA').Cost_Basis, led(1, 'RSUB').Quantity, led(1, 'RSUB').Cost_Basis, cash(1)],
+   [2, 2025, 7, 0, cashBeforeRsu], 'RSU: cost = qty x close on the date; missing close gives cost 0; cash unchanged');
+eq(res.rsuWithoutPrice, [{ date: '2026-09-16', symbol: 'RSUB', qty: 7 }], 'RSU rows without a price are reported');
+eq(DB.query("SELECT Type, Price, Amount FROM Transactions WHERE Symbol='RSUB'")[0], { Type: 'Record', Price: null, Amount: 0 }, 'file price not used for RSU');
+
+// Alternative option symbol format in a transaction file is converted before recording
+csv = Import.parseCsv('Date,Action,Symbol,Quantity,Price,Amount\n' +
+  '2025-12-01,Sell,ANET 01/02/2026 137.00 C,-3,$2.10,$628.50\n' +
+  '2025-12-15,Buy,ANET 01/02/2026 137.00 C,1,$0.50,-$50.65\n');
+const om = { Date: m('Date'), Action: m('Action'), Symbol: m('Symbol'), Quantity: m('Quantity'), Price: m('Price'), Amount: m('Amount') };
+res = Import.processTransactions(Import.prepareRows(csv, om, true), om, () => 1);
+eq(DB.query("SELECT Symbol, Category, Quantity FROM Transactions WHERE Symbol LIKE 'ANET%' ORDER BY Date"),
+   [{ Symbol: 'ANET20260102C137', Category: 'Option', Quantity: -3 }, { Symbol: 'ANET20260102C137', Category: 'Option', Quantity: 1 }],
+   'alternative option symbols stored in the standard format');
+const anet = Engine.activeEntry('Options', 1, 'ANET20260102C137');
+eq([anet.Quantity, anet.Asset, anet.Expiration_Date, anet.Strike, led(1, 'ANET 01/02/2026 137.00 C')], [-2, 'ANET', '2026-01-02', 137, null],
+   'option position recorded on the Options table, not the Ledger');

@@ -4,11 +4,12 @@ const Engine = (() => {
   // Transaction Type for each Effect ('Ignore' rows are never stored)
   const EFFECT_TYPE = {
     Trade: 'Trade', Reinvestment: 'Trade', Cash: 'Cash', Other: 'Other',
-    Distribution: 'Record', Split: 'Record', Merger: 'Other', Snapshot: 'Record'
+    Distribution: 'Record', Split: 'Record', Merger: 'Other', Snapshot: 'Record', RSU: 'Record'
   };
-  const EFFECTS    = ['Ignore', 'Trade', 'Cash', 'Other', 'Distribution', 'Split', 'Merger', 'Reinvestment'];
+  const EFFECTS    = ['Ignore', 'Trade', 'Cash', 'Other', 'Distribution', 'Split', 'Merger', 'Reinvestment', 'RSU'];
   const CATEGORIES = ['Asset', 'Equity', 'Option', 'Dividend', 'Fee', 'Interest', 'Margin', 'Tax', 'Transfer', 'Other'];
-  const NON_CASH_EFFECTS = ['Distribution', 'Split', 'Merger', 'Snapshot'];
+  const NON_CASH_EFFECTS = ['Distribution', 'Split', 'Merger', 'Snapshot', 'RSU'];
+  const RSU_PRICE_LOOKBACK_DAYS = 7;   // vesting on a weekend/holiday uses the last close before it
   const OPTION_MULTIPLIER = 100;
   const EPS = 1e-9;
 
@@ -20,7 +21,8 @@ const Engine = (() => {
   const _RX_CANON  = /^([A-Z][A-Z.]*)(\d{4})(\d{2})(\d{2})([CP])(\d+(?:\.\d+)?)$/;
   const _RX_YYMMDD = /^([A-Z][A-Z.]*)(\d{2})(\d{2})(\d{2})([CP])(\d+(?:\.\d+)?)$/;          // Fidelity: -GLD260821C515
   const _RX_OCC    = /^([A-Z][A-Z.]*)\s*(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/;                // OCC: NVDA270115C00360000
-  const _RX_SCHWAB = /^([A-Z][A-Z.]*)\s+(\d{2})\/(\d{2})\/(\d{4})\s+(\d+(?:\.\d+)?)\s+([CP])$/; // Schwab: NVDA 01/15/2027 360.00 C
+  // Alternative (Schwab) format: NVDA 01/15/2027 360.00 C — also 1/5/2027, 01/15/27 and $360.00
+  const _RX_SCHWAB = /^([A-Z][A-Z.]*)\s+(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})\s+\$?(\d+(?:\.\d+)?)\s+([CP])$/;
 
   const _fmtStrike = s => String(parseFloat(s));
 
@@ -31,7 +33,11 @@ const Engine = (() => {
     if ((m = s.match(_RX_CANON)))  return `${m[1]}${m[2]}${m[3]}${m[4]}${m[5]}${_fmtStrike(m[6])}`;
     if ((m = s.match(_RX_OCC)))    return `${m[1]}20${m[2]}${m[3]}${m[4]}${m[5]}${_fmtStrike(parseInt(m[6], 10) / 1000)}`;
     if ((m = s.match(_RX_YYMMDD))) return `${m[1]}20${m[2]}${m[3]}${m[4]}${m[5]}${_fmtStrike(m[6])}`;
-    if ((m = s.match(_RX_SCHWAB))) return `${m[1]}${m[4]}${m[2]}${m[3]}${m[6]}${_fmtStrike(m[5])}`;
+    if ((m = s.match(_RX_SCHWAB))) {
+      const pad = n => n.padStart(2, '0');
+      const year = m[4].length === 2 ? '20' + m[4] : m[4];
+      return `${m[1]}${year}${pad(m[2])}${pad(m[3])}${m[6]}${_fmtStrike(m[5])}`;
+    }
     return null;
   }
 
@@ -120,6 +126,8 @@ const Engine = (() => {
         return { qty: newQ, cost: _round2(opening) };
       }
       case 'Distribution': return { qty: _roundQ(q + dq), cost: C };
+      // Vested RSU shares: cost basis = quantity × the stock's closing price on the vesting date (stored as Price)
+      case 'RSU':          return { qty: _roundQ(q + dq), cost: _round2(C + dq * (txn.Price || 0)) };
       case 'Split':        return { qty: _roundQ(dq), cost: C };
       case 'Snapshot': {   // Price is per unit; an option contract covers 100 units
         const mult = isOption(txn.Symbol) ? OPTION_MULTIPLIER : 1;
@@ -127,6 +135,16 @@ const Engine = (() => {
       }
       default:             return { qty: q, cost: C };
     }
+  }
+
+  // Closing price of a symbol on a date (or the last close within RSU_PRICE_LOOKBACK_DAYS before it), or null
+  function priceOn(symbol, date) {
+    if (!symbol || !date) return null;
+    const [y, m, d] = date.split('-').map(Number);
+    const from = new Date(Date.UTC(y, m - 1, d - RSU_PRICE_LOOKBACK_DAYS)).toISOString().slice(0, 10);
+    const r = DB.query('SELECT Price FROM Prices WHERE Symbol=? AND Valid=1 AND Date<=? AND Date>=? ORDER BY Date DESC LIMIT 1',
+      [symbol, date, from])[0];
+    return r ? r.Price : null;
   }
 
   const _affectsCash     = t => t.Type === 'Cash' || t.Type === 'Trade';
@@ -330,7 +348,7 @@ const Engine = (() => {
   }
 
   return {
-    EFFECT_TYPE, EFFECTS, CATEGORIES, OPTION_MULTIPLIER,
+    EFFECT_TYPE, EFFECTS, CATEGORIES, OPTION_MULTIPLIER, RSU_PRICE_LOOKBACK_DAYS, priceOn,
     normalizeOption, normalizeSymbol, isOption, parseOption,
     loadRules, classify, resolveAmount, hash, nextPosition,
     activeEntry, supersede, adjustCash,

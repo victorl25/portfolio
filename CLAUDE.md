@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-A single-page application for tracking portfolio of securities such as stocks and ETFs (version 2: transaction-based — dividends, options, cash flows and a per-account ledger of held positions; see `design\VERSION_2.md` for the refactoring spec and `desihn\VERSION_2_PLAN.md` for the plan). Runs entirely locally in a bundled Chromium browser with no server, and no build step. Uses external services like Yahoo Finance MCP to retrieve price quotes and other asset data.
+A single-page application for tracking portfolio of securities such as stocks and ETFs (version 2: transaction-based — dividends, options, cash flows and a per-account ledger of held positions; see `design/VERSION_2.md` for the refactoring spec and `design/VERSION_2_PLAN.md` for the plan). Runs entirely locally in a bundled Chromium browser with no server, and no build step. Uses external services like Yahoo Finance MCP to retrieve price quotes and other asset data.
 
 ---
 
@@ -120,11 +120,11 @@ The full specification is in `VERSION_2.md`; `js/schema.js` holds the DDL. Table
 - **Assets** — Symbol (PK), Description, Type (Stock/ETF/MF), Category, Theme, Active. No Notes column (moved to Notes). No FK from Transactions/Ledger: assets are created after the transactions and ledger entries.
 - **Notes** — Note_ID, Symbol, Timestamp, Note. History of asset notes; the Assets view shows the latest.
 - **Prices** — Date (`YYYY-MM-DD`), Symbol, Price, Currency, Valid. One daily closing price per symbol and date (`UNIQUE(Symbol, Date)`), written with an upsert (`_upsertPrice()` in `app.js`).
-- **Transactions** — Transaction_ID, Account_ID, Date (`YYYY-MM-DD`), Type (Cash | Trade | Record | Other), Category (Equity | Option | Dividend | Fee | Interest | Margin | Tax | Transfer | Other), Effect (Trade | Cash | Other | Distribution | Split | Merger | Reinvestment | Snapshot), Symbol (equity ticker or canonical option symbol; NULL for cash-only), Quantity, Price, Amount (signed cash effect: + received, − paid), Currency, Description (from the Action column), Hash, Timestamp (entry time), Valid.
+- **Transactions** — Transaction_ID, Account_ID, Date (`YYYY-MM-DD`), Type (Cash | Trade | Record | Other), Category (Equity | Option | Dividend | Fee | Interest | Margin | Tax | Transfer | Other), Effect (Trade | Cash | Other | Distribution | Split | Merger | Reinvestment | RSU | Snapshot), Symbol (equity ticker or canonical option symbol; NULL for cash-only), Quantity, Price, Amount (signed cash effect: + received, − paid), Currency, Description (from the Action column), Hash, Timestamp (entry time), Valid.
 - **Ledger** — Holding_ID, Parent_ID, Transaction_ID, Timestamp, Account_ID, Symbol, Quantity, Cost_Basis, Currency, Active. Current snapshot of equity positions: one active entry per account + symbol (partial unique index). Options are not in the Ledger.
 - **Options** — Option_ID, Parent_ID, Transaction_ID, Timestamp, Account_ID, Symbol, Asset, Expiration_Date, Strike, Quantity (contracts, negative = written), Cost_Basis (total; premium paid +, received −), Currency, Active. Same model as the Ledger. Options are tracked, not valued.
 - **Mappings** — Mapping_ID, Header_Hash, Source, Target, Pattern; unique per Header_Hash + Source. Source is a field key: Account | Name | Date | Action | Symbol | Description | Quantity | Price | Amount | CostBasis | CurrentValue | Currency.
-- **Rules** — Rule_ID, Rule_Order, Pattern, Case_Sensitive, Symbol_Required, Category, Effect (Ignore | Trade | Cash | Other | Distribution | Split | Merger | Reinvestment), Sign, Description, Active. 21 rules are seeded by `createNew()` from `RULES_SEED`.
+- **Rules** — Rule_ID, Rule_Order, Pattern, Case_Sensitive, Symbol_Required, Category, Effect (Ignore | Trade | Cash | Other | Distribution | Split | Merger | Reinvestment | RSU), Sign, Description, Active. 21 rules are seeded by `createNew()` from `RULES_SEED`.
 - Views: **v_latest_price** (Symbol, Price, Date — latest valid price per symbol) and **v_holdings** (Symbol, Quantity, Cost_Basis — active Ledger entries with Quantity ≠ 0, summed per symbol). Use them instead of re-writing the latest-price/holdings subqueries.
 
 ### Transaction effects and the Ledger (`js/engine.js`)
@@ -137,6 +137,7 @@ Each transaction's Effect (copied from the matched rule; `Snapshot` for Import H
 | Cash | Cash | — | + Amount |
 | Other | Other | — | — |
 | Distribution | Record | q + Δq, cost kept | Amount 0 |
+| RSU | Record | q + Δq, cost + Δq × Price (the stock's close on the vesting date) | Amount 0 |
 | Split | Record | q = Δq (replaces), cost kept | Amount 0 |
 | Merger | Other | — (fixed by hand in the Ledger view) | Amount 0 |
 | Snapshot | Record | set quantity and cost from the file (cost = quantity × unit price, × 100 for options) | — |
@@ -146,8 +147,9 @@ Ledger/Options arithmetic (`Engine.nextPosition(q, C, txn)`): buy or add to a po
 - **Edit** (`Engine.editTransaction(old, changes)`): if the active entry of the pair references the edited transaction, a new entry = its Parent + the edited transaction; otherwise the edited transaction is applied in full (returns `{ warning: true }`, the UI warns that a rebuild may be needed). Cash changes by the Amount delta.
 - **Delete** (`Engine.deleteTransaction`): `Valid=0` and the Amount is reversed on cash; Ledger/Options unchanged (the UI warns first when `Engine.isReferenced()`).
 - **Rebuild** (`Engine.rebuildAccount(accountId)`, Ledger view button): replays the account's valid Trade/Record transactions by Date and supersedes all Ledger/Options entries (manual edits are lost).
-- Option symbols: canonical `<Ticker><YYYY><MM><DD><C|P><Strike>` (e.g. `NVDA20270115C360`, `NVDA20270115C182.5`). `Engine.normalizeOption()` also accepts Fidelity (`-GLD260821C515`), OCC (`NVDA270115C00360000`) and Schwab (`NVDA 01/15/2027 360.00 C`) formats; options use a ×100 multiplier when Amount is computed.
-- Amount (`Engine.resolveAmount`): the file's Amount when available, else `−Quantity × Price` (× 100 for options); `Sign` forces the sign; Distribution/Split/Merger/Snapshot are always 0.
+- Option symbols: canonical `<Ticker><YYYY><MM><DD><C|P><Strike>` (e.g. `NVDA20270115C360`, `NVDA20270115C182.5`). `Engine.normalizeOption()` also accepts Fidelity (`-GLD260821C515`), OCC (`NVDA270115C00360000`) and the alternative/Schwab format (`ANET 01/02/2026 137.00 C`, also with 1-digit month/day, 2-digit year or `$` before the strike) — imports and manual entries store the canonical form; options use a ×100 multiplier when Amount is computed.
+- Amount (`Engine.resolveAmount`): the file's Amount when available, else `−Quantity × Price` (× 100 for options); `Sign` forces the sign; Distribution/Split/Merger/Snapshot/RSU are always 0.
+- RSU price (`Engine.priceOn(symbol, date)`): the closing price from Prices on the date, or the last close within `RSU_PRICE_LOOKBACK_DAYS` (7) before it; stored as the transaction's Price. No RSU rule is seeded.
 - Hash (`Engine.hash`): account, date, symbol, quantity, price and amount.
 - Callers wrap engine writes in `DB.transaction(fn)` (BEGIN/COMMIT, ROLLBACK on error; nested calls join; async functions supported).
 
@@ -155,7 +157,7 @@ Ledger/Options arithmetic (`Engine.nextPosition(q, C, txn)`): buy or add to a po
 
 ## Inputs
 
-Accounts are entered in the Accounts view. Positions and transactions come from CSV imports or manual entry; assets are created (Yahoo Finance lookup) after the transactions and ledger entries that reference them. Neither import writes to Prices; after an import the user is offered Tools > Update prices.
+Accounts are entered in the Accounts view. Positions and transactions come from CSV imports or manual entry; assets are created (Yahoo Finance lookup) after the transactions and ledger entries that reference them. Neither import writes to Prices, except Import transactions storing the missing closing prices of RSU vesting dates; after an import the user is offered Tools > Update prices.
 
 ### CSV parsing and column mapping (shared)
 
@@ -172,12 +174,13 @@ Fields: Account, Name, Date, Symbol, Description, Quantity, Price, CostBasis, Cu
 ### File > Import transactions…
 
 Fields: Account, Name, Date, Action, Symbol, Description, Quantity, Price, Amount, Currency (Date, Action, Symbol, Quantity and Amount or Price required). `Import.processTransactions` (inside `DB.transaction`):
-1. Each row's Action is classified by the active Rules (`Engine.classify`), in Rule_Order, first match wins; rules with Symbol_Required are skipped for rows without a symbol. `Asset` category resolves to Option or Equity from the symbol.
-2. Effect Ignore → counted as ignored; no matching rule → listed as unrecognized (not stored; re-importing after adding a rule picks them up).
-3. For Trade/Reinvestment rows whose Quantity has the same sign as the Amount (e.g. Schwab sells), the quantity is negated.
-4. Amount is resolved, the Hash computed, and the row skipped as a duplicate when the hash matches a transaction recorded **before the import started** (identical rows within one file are all imported).
-5. The transaction is recorded and applied (`Engine.record`). Rows dated before the latest existing transaction of the same account + symbol are listed as "predating" (the ledger may need a rebuild).
-6. A summary dialog shows Imported / Ignored / Duplicates / Unrecognized (listed) / predating rows / asset lookup failures.
+1. The row's account is resolved first; rows of an account that is not found are counted as "account not found" and skipped (they are not rule-matched, so they never appear as ignored or unrecognized).
+2. Each row's Action is classified by the active Rules (`Engine.classify`), in Rule_Order, first match wins; rules with Symbol_Required are skipped for rows without a symbol. `Asset` category resolves to Option or Equity from the symbol.
+3. Effect Ignore → counted as ignored; no matching rule → listed as unrecognized (not stored; re-importing after adding a rule picks them up).
+4. For Trade/Reinvestment rows whose Quantity has the same sign as the Amount (e.g. Schwab sells), the quantity is negated.
+5. Amount is resolved, the Hash computed (from the file's values), and the row skipped as a duplicate when the hash matches a transaction recorded **before the import started** (identical rows within one file are all imported).
+6. The transaction is recorded and applied (`Engine.record`). RSU rows get Price = `Engine.priceOn(symbol, date)`; before the import `Import.rsuPriceRequests` lists RSU rows whose date has no stored close and `_fetchRsuPrices` retrieves them with `get_chart` (7 days before the date up to the next day) into Prices; RSU rows still without a price are recorded with cost 0 and listed in the summary. Rows dated before the latest existing transaction of the same account + symbol are listed as "predating" (the ledger may need a rebuild).
+7. A summary dialog shows Imported / Ignored / Duplicates / Account not found / Unrecognized (listed; known accounts only) / predating rows / asset lookup failures.
 
 ---
 
@@ -281,7 +284,7 @@ The latest price per symbol (`v_latest_price`): Symbol (hyperlink → Transactio
 ### The Transactions Tab
 
 Multi-instance (`txn-N`), built on the **Transactions table** (valid rows), optionally pre-filtered by account and/or symbol (label: symbol, else account name). Columns: Date, Account, Type, Category, Symbol, Quantity, Price, Amount, Description; natural order Date, Transaction_ID. Form: left Account, Date (`<input type="date">`), Effect / Category, Description; middle Symbol, Quantity, Price + Currency, Amount (blank = −Quantity × Price). Buttons: New, Delete, Accept.
-- New + Accept → `Engine.record` (Category `Asset` resolves to Equity/Option).
+- New + Accept → `Engine.record` (Category `Asset` resolves to Equity/Option; for Effect RSU with a blank Price, the stored close on the date is used, otherwise the user must enter it).
 - Accept on an existing row → `Engine.editTransaction`; when it reports `warning`, an alert explains that the edited transaction was applied in full and the ledger might need a rebuild.
 - Delete (or the Delete key) → `Engine.deleteTransaction`; when the transaction is referenced by any Ledger/Options entry the confirmation warns that the ledger might need to be rebuilt.
 

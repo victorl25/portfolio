@@ -106,6 +106,9 @@ const Import = (() => {
     const resolver = await _accountResolver(mapping, 'Select the account for the imported transactions.');
     if (!resolver) return;
 
+    // RSU rows need the stock's closing price on the vesting date: fetch the missing ones first
+    const priceFailures = await _fetchRsuPrices(rsuPriceRequests(rows, mapping, resolver));
+
     let result;
     try {
       result = await DB.transaction(() => processTransactions(rows, mapping, resolver));
@@ -113,7 +116,7 @@ const Import = (() => {
       await Dialogs.alert(`Import failed, no changes were made: ${e.message}`);
       return;
     }
-    const { stats, unrecognized, predating, newAssets } = result;
+    const { stats, unrecognized, predating, newAssets, rsuWithoutPrice } = result;
 
     const assetFailures = await _enrichAssets([...newAssets].map(([symbol, description]) => ({ symbol, description })));
     App.onDataChanged();
@@ -123,13 +126,16 @@ const Import = (() => {
         <tr><td>Imported</td><td>${stats.imported}</td></tr>
         <tr><td>Ignored because of the import rules</td><td>${stats.ignored}</td></tr>
         <tr><td>Skipped as duplicates (matching Hash)</td><td>${stats.duplicates}</td></tr>
-        <tr><td>Unrecognized (no matching rule)</td><td>${unrecognized.length}</td></tr>
-        ${stats.unknownAccount ? `<tr><td>Skipped (account not found)</td><td>${stats.unknownAccount}</td></tr>` : ''}
+        <tr><td>Skipped (account not found)</td><td>${stats.unknownAccount}</td></tr>
+        <tr><td>Unrecognized (no matching rule, accounts found)</td><td>${unrecognized.length}</td></tr>
       </table>`;
     html += _failureList('Unrecognized rows (add rules in View > Rules, then re-import the file)', unrecognized.map(u =>
       `${_esc(u.date)} · ${_esc(u.action)} · ${_esc(u.symbol || '—')} · qty ${_esc(u.qty)} · amount ${_esc(u.amount ?? '—')}`));
     html += _failureList('Transactions dated before existing transactions of the same account + symbol (the ledger may need to be rebuilt)',
       predating.map(p => `${_esc(p.date)} · ${_esc(names[p.accountId])} · ${_esc(p.symbol)} (latest existing ${_esc(p.prevDate)})`));
+    html += _failureList('RSU transactions without a closing price for the vesting date (cost basis 0; enter the price in View > Transactions)',
+      rsuWithoutPrice.map(p => `${_esc(p.date)} · ${_esc(p.symbol)} · qty ${_esc(p.qty)}` +
+        ((f => f ? ` (${_esc(f.reason)})` : '')(priceFailures.find(f => f.symbol === p.symbol && f.date === p.date)))));
     html += _failureList('Asset lookups failed', assetFailures.map(f => `<b>${_esc(f.symbol)}</b>: ${_esc(f.reason)}`));
     await Dialogs.alertHtml(html, 'Import Transactions');
     if (stats.imported) await _offerPriceUpdate();
@@ -144,7 +150,7 @@ const Import = (() => {
       .map(r => [`${r.Account_ID}|${r.Symbol}`, r.D]));
     const rules = Engine.loadRules();
     const stats = { imported: 0, ignored: 0, duplicates: 0, unknownAccount: 0 };
-    const unrecognized = [], predating = [];
+    const unrecognized = [], predating = [], rsuWithoutPrice = [];
     const newAssets = new Map();   // equity symbol → description
 
     for (const r of rows) {
@@ -156,14 +162,17 @@ const Import = (() => {
       const price     = _num(r, mapping, 'Price');
       const fileAmt   = _num(r, mapping, 'Amount');
 
+      // Rows of an account that is not found are skipped before the rules are applied,
+      // so they are neither imported nor reported as unrecognized
+      const accountId = resolver(r);
+      if (!accountId) { stats.unknownAccount++; continue; }
+
       const c = Engine.classify(action, symbol, rules);
       if (c.status === 'ignored') { stats.ignored++; continue; }
       if (c.status === 'unrecognized') {
         unrecognized.push({ date, action, symbol: rawSymbol, qty, amount: fileAmt });
         continue;
       }
-      const accountId = resolver(r);
-      if (!accountId) { stats.unknownAccount++; continue; }
 
       // Some brokers report sale quantities as positive numbers: the cash direction decides
       if ((c.effect === 'Trade' || c.effect === 'Reinvestment') && fileAmt && qty &&
@@ -177,16 +186,67 @@ const Import = (() => {
       const prevDate = affectsPosition ? latestDate.get(`${accountId}|${symbol}`) : null;
       if (prevDate && date < prevDate) predating.push({ date, symbol, prevDate, accountId });
 
+      // RSU: cost basis = quantity × the stock's closing price on the vesting date (not the file's price)
+      let storedPrice = price;
+      if (c.effect === 'RSU') {
+        storedPrice = Engine.priceOn(symbol, date);
+        if (storedPrice == null) rsuWithoutPrice.push({ date, symbol, qty });
+      }
+
       Engine.record({
         Account_ID: accountId, Date: date, Effect: c.effect, Category: c.category, Symbol: symbol || null,
-        Quantity: qty, Price: price, Amount: amount, Currency: _text(r, mapping, 'Currency') || 'USD',
+        Quantity: qty, Price: storedPrice, Amount: amount, Currency: _text(r, mapping, 'Currency') || 'USD',
         Description: action, Hash: h
       });
       stats.imported++;
       if (affectsPosition && !Engine.isOption(symbol) && !newAssets.has(symbol))
         newAssets.set(symbol, _text(r, mapping, 'Description'));
     }
-    return { stats, unrecognized, predating, newAssets };
+    return { stats, unrecognized, predating, newAssets, rsuWithoutPrice };
+  }
+
+  // { symbol, date } of RSU rows (known accounts) without a stored closing price for their date
+  function rsuPriceRequests(rows, mapping, resolver) {
+    const rules = Engine.loadRules();
+    const seen = new Set(), requests = [];
+    for (const r of rows) {
+      if (!resolver(r)) continue;
+      const symbol = Engine.normalizeSymbol(_text(r, mapping, 'Symbol'));
+      const c = Engine.classify(_text(r, mapping, 'Action'), symbol, rules);
+      if (c.status !== 'import' || c.effect !== 'RSU') continue;
+      const date = _parseDate(_text(r, mapping, 'Date'));
+      const key = `${symbol}|${date}`;
+      if (seen.has(key) || Engine.priceOn(symbol, date) != null) continue;
+      seen.add(key);
+      requests.push({ symbol, date });
+    }
+    return requests;
+  }
+
+  // Fetches the daily closes around each RSU vesting date (get_chart) and stores them in Prices.
+  async function _fetchRsuPrices(requests) {
+    const failures = [];
+    if (!requests.length) return failures;
+    const c = Dialogs.custom(`
+      <div class="dlg dlg-wide">
+        <div class="dlg-title">RSU Prices</div>
+        <div class="dlg-body"><p id="rsu-msg">Starting…</p></div>
+      </div>`);
+    for (let i = 0; i < requests.length; i++) {
+      const { symbol, date } = requests[i];
+      c.querySelector('#rsu-msg').textContent = `Fetching ${i + 1} / ${requests.length}: ${symbol} on ${date}…`;
+      try {
+        const chart = await YahooFinance.getChart(symbol, _addDaysStr(date, -Engine.RSU_PRICE_LOOKBACK_DAYS), _addDaysStr(date, 1), '1d');
+        const quotes = (chart?.quotes || []).filter(q => q.close != null && q.date);
+        quotes.forEach(q => _upsertPrice(symbol, _isoToDate(q.date), q.close));
+        if (Engine.priceOn(symbol, date) == null) failures.push({ symbol, date, reason: 'no closing price for the date' });
+      } catch (e) {
+        failures.push({ symbol, date, reason: e.message });
+      }
+      await new Promise(r => setTimeout(r, 100));
+    }
+    Dialogs.close();
+    return failures;
   }
 
   // ── CSV parsing and row preparation ─────────────────────────────────────
@@ -475,5 +535,5 @@ const Import = (() => {
   function _esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
   return { runHoldings, runTransactions, parseCsv, headerHash,
-           prepareRows: _prepareRows, collectSnapshot, processTransactions };   // non-UI steps exposed for testing
+           prepareRows: _prepareRows, collectSnapshot, processTransactions, rsuPriceRequests };   // non-UI steps exposed for testing
 })();

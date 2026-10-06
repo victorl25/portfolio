@@ -8,6 +8,9 @@ DB.run("INSERT INTO Accounts (Account, Name, Cash) VALUES ('X1','Margin',0),('X2
 eq(Engine.normalizeOption(' -GLD260821C515'), 'GLD20260821C515', 'Fidelity option symbol');
 eq(Engine.normalizeOption('-NVDA270115C360'), 'NVDA20270115C360', 'Fidelity option symbol 2');
 eq(Engine.normalizeOption('NVDA 01/15/2027 360.00 C'), 'NVDA20270115C360', 'Schwab option symbol');
+eq(Engine.normalizeOption('ANET 01/02/2026 137.00 C'), 'ANET20260102C137', 'alternative format');
+eq(Engine.normalizeOption(' anet  1/2/26  $137.50 p '), 'ANET20260102P137.5', 'alternative format: 1-digit month/day, 2-digit year, $, lowercase');
+eq(Engine.normalizeOption('ANET 13/40/2026 137.00 C') !== null, true, 'alternative format is not date-validated (as before)');
 eq(Engine.normalizeOption('NVDA270115C00182500'), 'NVDA20270115C182.5', 'OCC option symbol');
 eq(Engine.normalizeOption('NVDA20260101C182.5'), 'NVDA20260101C182.5', 'canonical option symbol');
 eq(Engine.normalizeOption('AAPL'), null, 'equity is not an option');
@@ -171,6 +174,24 @@ Engine.applySnapshot(3, '2026-10-04', [{ symbol: 'AIRR', quantity: 1500, costBas
                                        { symbol: 'NVDA 01/15/2027 360.00 C', quantity: -3, costBasis: -960.5 }], null);
 Engine.rebuildAccount(3);
 eq(Engine.activeEntry('Options', 3, sym).Cost_Basis, -960.5, 'rebuild restores the option snapshot cost (x100)');
+
+// ── RSU: Record type, no cash, cost basis = quantity × closing price on the vesting date
+DB.run("INSERT INTO Accounts (Account, Name, Cash) VALUES ('X9','RSU',0)");
+const A9 = DB.query("SELECT Account_ID FROM Accounts WHERE Account='X9'")[0].Account_ID;
+DB.run("INSERT INTO Prices (Date, Symbol, Price) VALUES ('2026-03-13','MSFT',400),('2026-03-16','MSFT',410.5),('2026-01-02','MSFT',380)");
+eq(Engine.priceOn('MSFT', '2026-03-16'), 410.5, 'price on the vesting date');
+eq(Engine.priceOn('MSFT', '2026-03-15'), 400, 'weekend vesting uses the last close before it');
+eq(Engine.priceOn('MSFT', '2026-02-20'), null, 'no close within the lookback window');
+eq(Engine.resolveAmount({ amount: 4105, quantity: 10, price: 410.5, effect: 'RSU', symbol: 'MSFT' }), 0, 'RSU amount is 0');
+const rsu = Engine.record({ Account_ID: A9, Date: '2026-03-16', Effect: 'RSU', Category: 'Equity', Symbol: 'MSFT',
+                            Quantity: 10, Price: Engine.priceOn('MSFT', '2026-03-16'), Amount: 0 });
+eq([rsu.Type, led(A9, 'MSFT').Quantity, led(A9, 'MSFT').Cost_Basis, cash(A9)], ['Record', 10, 4105, 0], 'RSU vest: qty and cost added, cash unchanged');
+T({ Account_ID: A9, Date: '2026-04-01', Symbol: 'MSFT', Quantity: -4, Price: 420, Amount: 1680 });
+Engine.record({ Account_ID: A9, Date: '2026-06-15', Effect: 'RSU', Category: 'Equity', Symbol: 'MSFT', Quantity: 5, Price: 450, Amount: 0 });
+eq([led(A9, 'MSFT').Quantity, led(A9, 'MSFT').Cost_Basis], [11, 4713], 'second vest adds to the averaged basis');
+Engine.rebuildAccount(A9);
+eq([led(A9, 'MSFT').Quantity, led(A9, 'MSFT').Cost_Basis], [11, 4713], 'rebuild replays RSU vests');
+ok(Engine.EFFECTS.includes('RSU') && Engine.EFFECT_TYPE.RSU === 'Record', 'RSU effect available (Rules/Transactions dropdowns)');
 
 // ── Transaction atomicity
 (async () => {
