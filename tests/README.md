@@ -26,6 +26,8 @@ python tests/run_tests.py
 | engine | `test_engine.js` | option symbols, rule classification, amounts, ledger/options arithmetic, edit/delete/rebuild, account snapshots |
 | import | `test_import.js` | CSV parsing and row preparation, Import transactions on the Fidelity and Schwab example files (`examples/`, when present — cash must match the broker's Cash Balance), duplicates, predating rows, Import holdings (cash rows by Current Value, option unit prices) |
 | update prices | `test_prices.js` | Tools > Update Prices with a stubbed `YahooFinance.getChart`: start date, upsert, 429 retries |
+| reports | `test_reports.js` | Portfolio/Account performance from stored prices only: YTD baselines (first close of the year, or the first available close for assets issued during it), 50-day baselines (50 trading days back, or the earliest stored close), Last Acquired, missing prices, weighted averages, account scope, no Yahoo calls |
+| dividends | `test_dividends.js` | Reports > Dividends: YTD window, sums per symbol, yield on current value, assets without value, grand total and value-weighted yield, contributing accounts and excluding unchecked accounts |
 | script load | `test_load.js` | all scripts load together in `index.html` order; Portfolio entry parser; date helpers |
 
 `examples/` and `data/` are not in the repository; checks that need them are reported as `SKIP`.

@@ -3,7 +3,7 @@ DB.createNew();
 eq(DB.query('SELECT Schema_Version AS v FROM Info').map(r => r.v), [SCHEMA_VERSION], 'new database has one Info row');
 eq(SCHEMA_VERSION, '2.0', 'schema version');
 eq(DB.query('SELECT COUNT(*) AS n FROM Rules WHERE Active=1')[0].n, RULES_SEED.length, 'rules seeded');
-eq(RULES_SEED.length, 21, '21 seeded rules');
+eq(RULES_SEED.length, 22, '22 seeded rules (incl. RSU rule 25)');
 eq(DB.query('SELECT Rule_Order FROM Rules WHERE Symbol_Required=0 ORDER BY Rule_Order').map(r => r.Rule_Order),
    [10, 140, 150, 170, 180], 'Symbol_Required off only for journal, interest, deposit, withdrawal rules');
 ok(DB.query('SELECT Pattern, Case_Sensitive FROM Rules').every(r => { try { new RegExp(r.Pattern, r.Case_Sensitive ? '' : 'i'); return true; } catch { return false; } }),

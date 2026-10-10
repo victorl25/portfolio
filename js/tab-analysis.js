@@ -158,53 +158,49 @@ const AnalysisTab = (() => {
 
   function _esc(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
-  // ── Analyze > Assets (trend analysis, ported from ../Stocks/trend.py) ──
+  // ── Analyze > Asset performance (trend analysis ported from ../Stocks/trend.py, plus a price chart) ──
 
-  async function openAssets() {
-    const input = await Dialogs.prompt(
-      'Enter one or more stock symbols, separated by space and/or comma:', '', 'Analyze Assets');
+  async function openAsset() {
+    const input = await Dialogs.prompt('Enter a stock or ETF symbol:', '', 'Asset Performance');
     if (!input) return;
-    const symbols = [...new Set(input.split(/[\s,]+/).map(s => s.trim().toUpperCase()).filter(Boolean))];
+    const symbols = input.split(/[\s,]+/).map(s => s.trim().toUpperCase()).filter(Boolean);
     if (!symbols.length) return;
-    _openAssetsForSymbols(symbols);
+    if (symbols.length > 1) { await Dialogs.alert('Asset performance works with one symbol at a time.'); return; }
+    openAssetFor(symbols[0]);
   }
 
-  // Runs the Analyze > Assets report directly for a known symbol, skipping the
+  // Runs the Analyze > Asset performance report directly for a known symbol, skipping the
   // prompt dialog — used by the Analyze button in the Portfolio tab's Action column.
-  function openAssetsFor(symbol) {
-    _openAssetsForSymbols([String(symbol).toUpperCase()]);
-  }
-
-  function _openAssetsForSymbols(symbols) {
+  function openAssetFor(symbol) {
+    const sym = String(symbol).trim().toUpperCase();
     const id = `aly-${++_ctr}`;
-    const label = symbols.length <= 3
-      ? `Assets: ${symbols.join(', ')}`
-      : `Assets: ${symbols.slice(0, 3).join(', ')}… (${symbols.length})`;
-    App.Tabs.open(id, label, panel => _buildAssets(panel, id, symbols),
-      { autoRefresh: false, refresh: () => _refreshAssets(id) });
+    App.Tabs.open(id, `Asset: ${sym}`, panel => _buildAsset(panel, id, sym),
+      { autoRefresh: false, refresh: () => _refreshAsset(id), onClose: () => _disposeChart(id) });
   }
 
-  function _buildAssets(panel, id, symbols) {
-    panel.innerHTML = `<div id="${id}-wrap" class="aly-assets-scroll"></div>`;
-    panel._alySymbols = symbols;
-    _runAssetsAnalysis(panel, id, symbols);
+  function _buildAsset(panel, id, symbol) {
+    panel.innerHTML = `
+      <div class="aly-asset-layout">
+        <div id="${id}-card" class="aly-card-zone"></div>
+        <div id="${id}-chart" class="aly-chart"></div>
+      </div>`;
+    panel._alySymbol = symbol;
+    _runAssetAnalysis(panel, id, symbol);
   }
 
-  function _refreshAssets(id) {
+  function _refreshAsset(id) {
     const panel = document.getElementById(`panel-${id}`);
-    if (panel && panel._alySymbols) _runAssetsAnalysis(panel, id, panel._alySymbols);
+    if (panel && panel._alySymbol) _runAssetAnalysis(panel, id, panel._alySymbol);
   }
 
-  async function _runAssetsAnalysis(panel, id, symbols) {
-    const wrap = panel.querySelector(`#${id}-wrap`);
-
-    const c = Dialogs.custom(`
+  async function _runAssetAnalysis(panel, id, symbol) {
+    Dialogs.custom(`
       <div class="dlg dlg-wide">
-        <div class="dlg-title">Analyzing Assets</div>
-        <div class="dlg-body"><p id="${id}-aly-msg">Starting…</p></div>
+        <div class="dlg-title">Analyzing Asset</div>
+        <div class="dlg-body"><p>Analyzing ${_esc(symbol)}…</p></div>
       </div>`);
 
-    // Shared S&P 500 (^GSPC) 52-week benchmark change, fetched once for the whole batch.
+    // S&P 500 (^GSPC) 52-week benchmark change
     let sandp = null;
     try {
       const gspcChart = await YahooFinance.getChart('^GSPC', _daysAgo(400), _todayStr(), '1d');
@@ -212,21 +208,20 @@ const AnalysisTab = (() => {
     } catch { /* benchmark comparison lines fall back to '—' */ }
     await _sleep(100);
 
-    const cards = [];
-    for (let i = 0; i < symbols.length; i++) {
-      const sym = symbols[i];
-      const msgEl = c.querySelector(`#${id}-aly-msg`);
-      if (msgEl) msgEl.textContent = `Analyzing ${i + 1} / ${symbols.length}: ${sym}…`;
-      try {
-        const data = await _analyzeSymbol(sym, sandp);
-        cards.push({ symbol: sym, ok: true, data });
-      } catch (e) {
-        cards.push({ symbol: sym, ok: false, error: e.message });
-      }
+    let result;
+    try {
+      result = { ok: true, ...(await _analyzeSymbol(symbol, sandp)) };
+    } catch (e) {
+      result = { ok: false, error: e.message };
     }
-
     Dialogs.close();
-    wrap.innerHTML = cards.map(_renderCard).join('');
+
+    const cardEl  = panel.querySelector(`#${id}-card`);
+    const chartEl = panel.querySelector(`#${id}-chart`);
+    if (!cardEl || !chartEl) return;   // tab closed meanwhile
+    cardEl.innerHTML = _renderCard({ symbol, ok: result.ok, data: result.card, error: result.error });
+    if (result.ok) _drawChart(id, chartEl, symbol, result.series);
+    else { _disposeChart(id); chartEl.innerHTML = ''; }
   }
 
   async function _analyzeSymbol(symbol, sandp) {
@@ -264,9 +259,143 @@ const AnalysisTab = (() => {
     await _sleep(100);
 
     const quoteType = summary?.price?.quoteType || 'EQUITY';
-    return quoteType === 'ETF'
+    const card = quoteType === 'ETF'
       ? _buildEtfLines(symbol, summary, calc)
       : _buildEquityLines(symbol, summary, calc);
+    return { card, series: chartSeries(quotes, ma20, ma50, ma200, rsiSeries) };
+  }
+
+  // ── Price + RSI chart (D3) ────────────────────────────────────────────
+  const CHART_DAYS = 365;   // calendar days back from the latest close (a full year, not year-to-date)
+  const CHART_LINES = [
+    { key: 'close', label: 'Close',  color: '#2c3e50', width: 2 },
+    { key: 'ma20',  label: 'MA 20',  color: '#e67e22', width: 1.25 },
+    { key: 'ma50',  label: 'MA 50',  color: '#27ae60', width: 1.25 },
+    { key: 'ma200', label: 'MA 200', color: '#8e44ad', width: 1.25 },
+  ];
+  const RSI_COLOR = '#2980b9';
+  const RSI_LEVELS = [70, 30];   // overbought / oversold reference lines
+  const _chartObservers = {};
+
+  // Quotes of the last CHART_DAYS calendar days: { date: Date, close, ma20, ma50, ma200, rsi }
+  // (averages and RSI are computed over the full fetched history, so they are defined across the window)
+  function chartSeries(quotes, ma20, ma50, ma200, rsi) {
+    if (!quotes.length) return [];
+    const cutoff = new Date(quotes[quotes.length - 1].date).getTime() - CHART_DAYS * 24 * 3600 * 1000;
+    const out = [];
+    for (let i = 0; i < quotes.length; i++) {
+      const date = new Date(quotes[i].date);
+      if (date.getTime() < cutoff) continue;
+      out.push({ date, close: quotes[i].close, ma20: ma20[i], ma50: ma50[i], ma200: ma200[i],
+                 rsi: rsi ? rsi[i] : null });
+    }
+    return out;
+  }
+
+  function _disposeChart(id) {
+    if (_chartObservers[id]) { _chartObservers[id].disconnect(); delete _chartObservers[id]; }
+  }
+
+  // Draws the price chart (close + 20/50/200-day averages) with the RSI(14) panel below it;
+  // redrawn when the container is resized.
+  function _drawChart(id, el, symbol, series) {
+    _disposeChart(id);
+    if (typeof d3 === 'undefined') { el.innerHTML = '<div class="rpt-empty">Chart library (lib/d3.min.js) not loaded.</div>'; return; }
+    const render = () => _renderChart(el, symbol, series);
+    render();
+    let lastW = el.clientWidth, lastH = el.clientHeight;
+    const ro = new ResizeObserver(() => {
+      if (el.clientWidth === lastW && el.clientHeight === lastH) return;
+      lastW = el.clientWidth; lastH = el.clientHeight;
+      render();
+    });
+    ro.observe(el);
+    _chartObservers[id] = ro;
+  }
+
+  function _renderChart(el, symbol, series) {
+    el.innerHTML = '';
+    const width  = Math.max(el.clientWidth, 420);
+    const height = Math.max(el.clientHeight, 360);
+    const m = { top: 44, right: 24, bottom: 32, left: 64 };
+    const gap = 26;                                   // space between the price and RSI panels (RSI label)
+    const w = width - m.left - m.right;
+    const inner = height - m.top - m.bottom - gap;
+    const hRsi = Math.max(70, Math.round(inner * 0.24));
+    const hPrice = inner - hRsi;
+    if (!series.length || w <= 0 || hPrice <= 0) return;
+
+    const values = series.flatMap(d => CHART_LINES.map(l => d[l.key])).filter(v => v != null && isFinite(v));
+    const [lo, hi] = d3.extent(values);
+    const pad = (hi - lo) * 0.05 || hi * 0.05 || 1;
+    const x = d3.scaleTime().domain(d3.extent(series, d => d.date)).range([0, w]);
+    const y = d3.scaleLinear().domain([lo - pad, hi + pad]).nice().range([hPrice, 0]);
+    const yRsi = d3.scaleLinear().domain([0, 100]).range([hRsi, 0]);
+    const xTicks = Math.max(2, Math.floor(w / 90));
+
+    const svg = d3.select(el).append('svg').attr('width', width).attr('height', height).attr('class', 'aly-chart-svg');
+    const first = series[0].date, last = series[series.length - 1].date;
+    const fmtDay = d3.timeFormat('%b %d, %Y');
+    svg.append('text').attr('class', 'aly-chart-title').attr('x', m.left).attr('y', 18)
+      .text(`${symbol} — closing prices, ${fmtDay(first)} – ${fmtDay(last)} (${series.length} trading days)`);
+
+    // Legend
+    const legend = svg.append('g').attr('transform', `translate(${m.left},${32})`);
+    let lx = 0;
+    for (const l of [...CHART_LINES, { label: 'RSI 14', color: RSI_COLOR, width: 1.25 }]) {
+      const g = legend.append('g').attr('transform', `translate(${lx},0)`);
+      g.append('line').attr('x1', 0).attr('x2', 18).attr('y1', -4).attr('y2', -4).attr('stroke', l.color).attr('stroke-width', l.width + 0.75);
+      g.append('text').attr('class', 'aly-chart-legend').attr('x', 23).attr('y', 0).text(l.label);
+      lx += 23 + l.label.length * 7 + 18;
+    }
+
+    // ── Price panel
+    const plot = svg.append('g').attr('transform', `translate(${m.left},${m.top})`);
+    plot.append('g').attr('class', 'aly-chart-grid')
+      .call(d3.axisLeft(y).ticks(6).tickSize(-w).tickFormat(''));
+    plot.append('g').attr('class', 'aly-chart-axis').attr('transform', `translate(0,${hPrice})`)
+      .call(d3.axisBottom(x).ticks(xTicks).tickFormat(''));
+    plot.append('g').attr('class', 'aly-chart-axis')
+      .call(d3.axisLeft(y).ticks(6).tickFormat(d3.format(',.0f')));
+    for (const l of CHART_LINES) {
+      const line = d3.line().defined(d => d[l.key] != null && isFinite(d[l.key])).x(d => x(d.date)).y(d => y(d[l.key]));
+      plot.append('path').datum(series).attr('fill', 'none').attr('stroke', l.color)
+        .attr('stroke-width', l.width).attr('stroke-linejoin', 'round').attr('d', line);
+    }
+    _addCursorLine(plot, w, hPrice, m.left, y, d3.format(',.2f'));
+
+    // ── RSI panel (same time axis)
+    const rsiTop = m.top + hPrice + gap;
+    const rsiPlot = svg.append('g').attr('transform', `translate(${m.left},${rsiTop})`);
+    rsiPlot.append('text').attr('class', 'aly-chart-legend').attr('x', 0).attr('y', -7).text('RSI (14)');
+    for (const lvl of RSI_LEVELS) {
+      rsiPlot.append('line').attr('class', 'aly-chart-level').attr('x1', 0).attr('x2', w).attr('y1', yRsi(lvl)).attr('y2', yRsi(lvl));
+    }
+    rsiPlot.append('g').attr('class', 'aly-chart-axis').attr('transform', `translate(0,${hRsi})`)
+      .call(d3.axisBottom(x).ticks(xTicks).tickFormat(d3.timeFormat('%b %d')));
+    rsiPlot.append('g').attr('class', 'aly-chart-axis')
+      .call(d3.axisLeft(yRsi).tickValues([0, 30, 70, 100]));
+    const rsiLine = d3.line().defined(d => d.rsi != null && isFinite(d.rsi)).x(d => x(d.date)).y(d => yRsi(d.rsi));
+    rsiPlot.append('path').datum(series).attr('fill', 'none').attr('stroke', RSI_COLOR)
+      .attr('stroke-width', 1.25).attr('stroke-linejoin', 'round').attr('d', rsiLine);
+    _addCursorLine(rsiPlot, w, hRsi, m.left, yRsi, d3.format('.1f'));
+  }
+
+  // Horizontal indicator: a faint dashed line following the cursor over a panel,
+  // with the panel's value at that height shown in a tag on the Y axis.
+  function _addCursorLine(panel, w, h, leftMargin, scale, fmt) {
+    const cross = panel.append('g').attr('class', 'aly-chart-cross').style('display', 'none');
+    cross.append('line').attr('x1', 0).attr('x2', w);
+    const tag = cross.append('g');
+    tag.append('rect').attr('x', -leftMargin + 2).attr('y', -9).attr('width', leftMargin - 6).attr('height', 18).attr('rx', 3);
+    const tagText = tag.append('text').attr('x', -8).attr('y', 4).attr('text-anchor', 'end');
+    panel.append('rect').attr('width', w).attr('height', h).attr('fill', 'transparent')
+      .on('mousemove', ev => {
+        const [, my] = d3.pointer(ev);
+        cross.style('display', null).attr('transform', `translate(0,${my})`);
+        tagText.text(fmt(scale.invert(my)));
+      })
+      .on('mouseleave', () => cross.style('display', 'none'));
   }
 
   // Compares a to b like trend.py's c()/cp() helpers: '++' (bullish/green) or '--' (bearish/red).
@@ -495,5 +624,5 @@ const AnalysisTab = (() => {
 
   function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-  return { openPortfolio, openAccount, openAssets, openAssetsFor };
+  return { openPortfolio, openAccount, openAsset, openAssetFor, chartSeries };
 })();

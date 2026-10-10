@@ -121,12 +121,12 @@ const AssetsTab = (() => {
   function _loadData() {
     return DB.query(`
       SELECT a.Symbol, a.Description, a.Type, a.Category, a.Theme, a.Active,
-        COALESCE(h.Quantity, 0) AS Quantity,
+        h.Quantity,
         (SELECT n.Note FROM Notes n WHERE n.Symbol = a.Symbol ORDER BY n.Timestamp DESC, n.Note_ID DESC LIMIT 1) AS Notes,
         (SELECT COUNT(*) FROM Notes n WHERE n.Symbol = a.Symbol) AS NoteCount
       FROM Assets a
-      LEFT JOIN v_holdings h ON a.Symbol = h.Symbol
-      WHERE a.Active = 1
+      JOIN v_holdings h ON a.Symbol = h.Symbol   -- held assets only (v_holdings excludes quantity 0)
+      WHERE a.Active = 1 AND h.Quantity <> 0
       ORDER BY a.Symbol`);
   }
 

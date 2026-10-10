@@ -68,7 +68,7 @@ const PortfolioTab = (() => {
           formatter: () => `<button class="act-btn analyze-btn">Analyze</button>`,
           cellClick: (e, cell) => {
             if (!e.target.classList.contains('act-btn')) return;
-            AnalysisTab.openAssetsFor(cell.getRow().getData().Symbol);
+            AnalysisTab.openAssetFor(cell.getRow().getData().Symbol);
           }
         }
       ]

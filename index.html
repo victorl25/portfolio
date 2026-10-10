@@ -38,15 +38,16 @@
       </div>
       <div class="menu-item" id="menu-analyze">Analyze
         <div class="dropdown">
-          <div class="dropdown-item" id="cmd-analyze-portfolio">Portfolio</div>
-          <div class="dropdown-item" id="cmd-analyze-account">Account</div>
-          <div class="dropdown-item" id="cmd-analyze-assets">Assets</div>
+          <div class="dropdown-item" id="cmd-analyze-portfolio-performance">Portfolio performance</div>
+          <div class="dropdown-item" id="cmd-analyze-account-performance">Account performance</div>
+          <div class="dropdown-item" id="cmd-analyze-asset-performance">Asset performance</div>
         </div>
       </div>
       <div class="menu-item" id="menu-reports">Reports
         <div class="dropdown">
-          <div class="dropdown-item" id="cmd-report-portfolio-performance">Portfolio performance</div>
-          <div class="dropdown-item" id="cmd-report-account-performance">Account performance</div>
+          <div class="dropdown-item" id="cmd-report-portfolio-theme">Portfolio by theme</div>
+          <div class="dropdown-item" id="cmd-report-account-theme">Account by theme</div>
+          <div class="dropdown-item" id="cmd-report-dividends">Dividends</div>
         </div>
       </div>
       <div class="menu-item" id="menu-tools">Tools
@@ -82,6 +83,7 @@
   <!-- ── Scripts (load order matters — dependencies first) ─────────────── -->
   <script src="lib/sql-wasm.js"></script>
   <script src="lib/tabulator.min.js"></script>
+  <script src="lib/d3.min.js"></script>
   <script src="js/schema.js"></script>
   <script src="js/db.js"></script>
   <script src="js/engine.js"></script>
@@ -98,6 +100,7 @@
   <script src="js/tab-query.js"></script>
   <script src="js/tab-reports.js"></script>
   <script src="js/tab-analysis.js"></script>
+  <script src="js/tab-dividends.js"></script>
   <script src="js/app.js"></script>
 
 </body>

@@ -4,7 +4,7 @@ import os, subprocess, sys
 TESTS = os.path.dirname(os.path.abspath(__file__))
 APP_SCRIPTS = ['js/dialogs.js', 'js/import.js', 'js/tab-portfolio.js', 'js/tab-accounts.js', 'js/tab-assets.js',
                'js/tab-prices.js', 'js/tab-transactions.js', 'js/tab-ledger.js', 'js/tab-options.js', 'js/tab-rules.js',
-               'js/tab-query.js', 'js/tab-reports.js', 'js/tab-analysis.js', 'js/app.js']   # index.html order
+               'js/tab-query.js', 'js/tab-reports.js', 'js/tab-analysis.js', 'js/tab-dividends.js', 'js/app.js']   # index.html order
 
 SUITES = [
     ('static checks',  ['check_static.py']),
@@ -12,7 +12,9 @@ SUITES = [
     ('engine',         ['harness.py', 'test_engine.js']),
     ('import',         ['harness.py', 'js/import.js', 'test_import.js']),
     ('update prices',  ['harness.py', 'pre:stubs_ui.js', 'js/app.js', 'test_prices.js']),
-    ('script load',    ['harness.py', *APP_SCRIPTS, 'test_load.js']),
+    ('reports',        ['harness.py', 'js/tab-reports.js', 'test_reports.js']),
+    ('dividends',      ['harness.py', 'js/tab-dividends.js', 'test_dividends.js']),
+    ('script load',    ['harness.py', 'lib/d3.min.js', *APP_SCRIPTS, 'test_load.js']),
 ]
 
 failed = []

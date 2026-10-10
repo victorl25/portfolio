@@ -386,13 +386,6 @@ html, body {
 }
 
 /* ── Asset Analysis (Analyze > Assets) — side-by-side report cards ───── */
-.aly-assets-scroll {
-  display: flex;
-  flex-direction: row;
-  align-items: stretch;
-  height: 100%;
-  overflow: auto;
-}
 
 .aly-card {
   flex: 0 0 auto;
@@ -764,3 +757,34 @@ a.cell-link:hover { text-decoration: underline; }
 .imp-summary { border-collapse: collapse; font-size: 13px; margin-bottom: 4px; }
 .imp-summary td { padding: 3px 10px 3px 0; }
 .imp-summary td:last-child { text-align: right; font-weight: 600; }
+
+/* ── Analyze > Asset: indicator card + price chart ───────────────────── */
+.aly-asset-layout {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  height: 100%;
+  overflow: auto;
+}
+.aly-card-zone { flex: 0 0 auto; border-right: 1px solid #dde2ea; overflow-y: auto; }
+.aly-card-zone .aly-card { border-right: none; }
+.aly-chart { flex: 1 1 auto; min-width: 420px; min-height: 300px; position: relative; overflow: hidden; background: #fff; }
+.aly-chart-svg { display: block; font-family: inherit; }
+.aly-chart-title { font-size: 14px; font-weight: 600; fill: #2c3e50; }
+.aly-chart-legend { font-size: 12px; fill: #444; }
+.aly-chart-axis text { font-size: 11px; fill: #555; }
+.aly-chart-axis path, .aly-chart-axis line { stroke: #b8c0cc; }
+.aly-chart-grid line { stroke: #eef1f5; }
+.aly-chart-grid path { display: none; }
+.aly-chart-cross line { stroke: #7f8c8d; stroke-width: 1; stroke-dasharray: 4 4; opacity: 0.6; pointer-events: none; }
+.aly-chart-cross rect { fill: #2c3e50; opacity: 0.85; }
+.aly-chart-cross text { fill: #fff; font-size: 11px; font-weight: 600; }
+.aly-chart-cross { pointer-events: none; }
+.aly-chart-level { stroke: #95a5a6; stroke-width: 1; stroke-dasharray: 3 3; opacity: 0.7; }
+.rpt-note { margin-left: auto; font-size: 12px; color: #c0392b; }
+
+/* Report filters (e.g. Reports > Dividends account checkboxes) */
+.rpt-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px; max-width: 560px; margin: -10px 0 16px; font-size: 13px; color: #333; }
+.rpt-filters-label { font-weight: 600; color: #2c3e50; }
+.rpt-filter { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; white-space: nowrap; }
+.rpt-filter-sub { color: #888; font-size: 12px; }

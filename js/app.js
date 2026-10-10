@@ -628,12 +628,15 @@ function _initMenus() {
   cmd('cmd-view-options').addEventListener('click', () => { _closeMenus(); OptionsTab.open(); });
   cmd('cmd-view-rules').addEventListener('click', () => { _closeMenus(); RulesTab.open(); });
 
-  cmd('cmd-analyze-portfolio').addEventListener('click', () => { _closeMenus(); AnalysisTab.openPortfolio(); });
-  cmd('cmd-analyze-account').addEventListener('click', () => { _closeMenus(); AnalysisTab.openAccount(); });
-  cmd('cmd-analyze-assets').addEventListener('click', () => { _closeMenus(); AnalysisTab.openAssets(); });
+  // Analyze: performance (ReportsTab: holdings with Total / YTD / 50-day G/L; AnalysisTab: one asset's trend report)
+  cmd('cmd-analyze-portfolio-performance').addEventListener('click', () => { _closeMenus(); ReportsTab.open(); });
+  cmd('cmd-analyze-account-performance').addEventListener('click', () => { _closeMenus(); ReportsTab.openAccount(); });
+  cmd('cmd-analyze-asset-performance').addEventListener('click', () => { _closeMenus(); AnalysisTab.openAsset(); });
 
-  cmd('cmd-report-portfolio-performance').addEventListener('click', () => { _closeMenus(); ReportsTab.open(); });
-  cmd('cmd-report-account-performance').addEventListener('click', () => { _closeMenus(); ReportsTab.openAccount(); });
+  // Reports: value by Theme (AnalysisTab)
+  cmd('cmd-report-portfolio-theme').addEventListener('click', () => { _closeMenus(); AnalysisTab.openPortfolio(); });
+  cmd('cmd-report-account-theme').addEventListener('click', () => { _closeMenus(); AnalysisTab.openAccount(); });
+  cmd('cmd-report-dividends').addEventListener('click', () => { _closeMenus(); DividendsTab.open(); });
 
   cmd('cmd-update-prices').addEventListener('click', () => { _closeMenus(); cmdUpdatePrices(); });
   cmd('cmd-query-db').addEventListener('click', () => { _closeMenus(); QueryTab.open(); });

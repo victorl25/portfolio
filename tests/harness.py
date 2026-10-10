@@ -4,7 +4,7 @@
 # Usage (from the repo root):
 #   python tests/harness.py [pre:stub.js ...] [js/app-file.js ...] test_file.js [...]
 #   - pre:<file>  stubs evaluated before the app scripts (path relative to tests/)
-#   - js/<file>   app scripts loaded after js/schema.js, js/db.js and js/engine.js, in the given order
+#   - js/<file>, lib/<file>  app scripts / libraries loaded after js/schema.js, js/db.js and js/engine.js, in the given order
 #   - <file>      test scripts (path relative to tests/), run last; pending promise jobs are drained
 #
 # Requires the `quickjs` package: python -m pip install --target tests/.pylib quickjs
@@ -112,10 +112,10 @@ args = sys.argv[1:]
 for pre in [a[4:] for a in args if a.startswith('pre:')]:
     ctx.eval(_read(os.path.join(TESTS, pre)))
 
-for f in ['js/schema.js', 'js/db.js', 'js/engine.js'] + [a for a in args if a.startswith('js/')]:
+for f in ['js/schema.js', 'js/db.js', 'js/engine.js'] + [a for a in args if a.startswith(('js/', 'lib/'))]:
     ctx.eval(_read(os.path.join(ROOT, f)))
 
-for t in [a for a in args if not a.startswith(('js/', 'pre:'))]:
+for t in [a for a in args if not a.startswith(('js/', 'lib/', 'pre:'))]:
     ctx.eval(_read(os.path.join(TESTS, t)))
     while ctx.execute_pending_job():    # run async tests to completion
         pass

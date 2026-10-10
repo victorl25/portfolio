@@ -26,7 +26,7 @@ db = sqlite3.connect(':memory:')
 db.executescript(schema)
 
 # Interpolated SQL fragments replaced by neutral text; ${table}/${_idCol(table)} are tried for both tables
-SUBS = {'${where}': '1=1', '${themeJoin}': '', '${accFilter}': ''}
+SUBS = {'${where}': '1=1', '${themeJoin}': '', '${accFilter}': '', '${acc}': '', '${inList}': 'AND Account_ID NOT IN (?)'}
 TABLES = [('Ledger', 'Holding_ID'), ('Options', 'Option_ID')]
 count = 0
 for f in JS:
@@ -35,6 +35,8 @@ for f in JS:
         sql = m.group(1)[1:-1]
         for k, v in SUBS.items():
             sql = sql.replace(k, v)
+        # conditional fragments like ${accountId ? 'AND Account_ID = ?' : ''} -> the non-empty branch
+        sql = re.sub(r"\$\{[^{}?]*\?\s*'([^']*)'\s*:\s*''\}", lambda g: g.group(1), sql)
         if sql.strip().upper() in ('BEGIN', 'COMMIT', 'ROLLBACK'):
             continue
         variants = [sql.replace('${table}', t).replace('${_idCol(table)}', i) for t, i in TABLES] if '${table}' in sql else [sql]

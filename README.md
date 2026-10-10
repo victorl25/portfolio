@@ -1,6 +1,6 @@
 # Portfolio Tracker
 
-A personal investment portfolio tracker that runs entirely on your local machine. No server, no cloud, no account required. Your data stays in a SQLite file on your own disk.
+A personal investment portfolio tracker that runs entirely on your local machine. No server, no cloud, no account required. Your data stays in a SQLite file on your own disk. It keeps track of the portfolio by importing holdings and transactions extracts (CSV) from your broker and retrieving current asset prices from Yahoo Finance.
 
 ---
 
@@ -54,7 +54,7 @@ portfolio.bat  D:\MyInvestments
 
 When you launch Portfolio Tracker for the first time there is no data yet. The recommended setup order is:
 
-1. **Add accounts** — open View > Accounts, click New, fill in Account (the account number or identifier) and Name, then click Accept.
+1. **Add accounts** — open View > Accounts, click New, fill in Account (the account number or identifier) and Name, then click Accept. Account number will have to match the account number provided in the data extracts from your broker.
 2. **Import your positions** — use **File > Import holdings** to load a positions export from your broker (see [Importing Holdings](#importing-holdings-positions)). This sets each account's holdings, cost basis and cash.
 3. **Import transactions** — use **File > Import transactions** to load your broker's transaction history (trades, dividends, interest, fees, options), or enter transactions manually from the Portfolio tab.
 4. **Update prices** — use Tools > Update Prices to fetch daily closing prices from Yahoo Finance.
@@ -69,7 +69,7 @@ All changes are held in memory until you explicitly save. Use **File > Save port
 
 To open a previously saved file use **File > Open portfolio**.
 
-**Your data is never saved automatically.** Save before closing the window.
+**Your data is never saved automatically.** Save before closing the window. This provides a benefit when data import does not work correctly or encounters errors. In that case simply close the app without saving and restart to return to the portfolio state before the attempted import.
 
 ---
 
@@ -77,7 +77,7 @@ To open a previously saved file use **File > Open portfolio**.
 
 The application is organized as a **menu bar** at the top and a **tab strip** below it. Tabs open on demand and stay open until you close them (every tab has a × button). The **Refresh** button at the right end of the tab strip reloads data for the currently active tab.
 
-Each view tab is split into two zones:
+Most view tabs are split into two zones:
 - **Table zone** (upper ~75%) — a sortable, filterable data table
 - **Form zone** (lower ~25%) — a detail/edit form linked to the selected table row
 
@@ -88,8 +88,8 @@ Click any column header to sort; click again to reverse; click a third time to c
 ## How Version 2 Tracks Your Portfolio
 
 - **Transactions** record everything that happens in an account: trades, dividends, interest, fees, taxes, deposits and withdrawals, option trades, splits and spin-offs. Each transaction has an **Amount** — its effect on the account's cash (positive = received, negative = paid).
-- The **Ledger** holds one current entry per account + symbol with the quantity held and the remaining **cost basis**. Each trade updates the entry: buys add their cost (including fees), sales reduce the cost proportionally (average cost). The previous entry is kept (inactive) as history.
-- **Options** are tracked the same way, per account + option symbol (e.g. `NVDA20270115C360` = NVDA, 2027-01-15, call, strike 360). Options are listed but not included in the portfolio value.
+- The **Ledger** holds one current entry per account + symbol with the quantity held and the **cost basis**. Each trade updates the entry: buys add their cost (including fees), sales reduce the cost proportionally (average cost). The previous ledger entry is kept (inactive) as history.
+- **Options** are tracked the same way, per account + option symbol (e.g. `NVDA20270115C360` = NVDA, 2027-01-15, call, strike 360). Options are listed but not included in the portfolio value yet due to the lack of option pricing API from Yahoo Finance.
 - **Cash** in each account changes by the Amount of every cash-affecting transaction.
 - **Prices** are daily closing prices.
 
@@ -110,11 +110,11 @@ The default tab, opened automatically on launch. Shows your current positions (f
 | Gain / Loss | Value minus cost basis |
 | % Gain/Loss | Gain/Loss as a percentage of cost basis |
 | % Portfolio | This position's share of total portfolio value (including cash) |
-| Action | **Analyze** — trend analysis report for the asset |
+| Action | **Analyze** — trend analysis report for the asset, with a price chart (also **Analyze > Asset performance**) |
 
 The **Total Value** is displayed at the top of the form zone.
 
-**Entering a transaction directly** — type in the input box and press Enter. Prices are written with a `$` sign; a date (`YYYY-MM-DD`) is optional and defaults to today:
+**Entering a transaction directly** — type in the input box and press Enter. Prices are written with the currency symbol (i.e. `$` sign, only USD transactions are supported currently); a date (`YYYY-MM-DD`) is optional and defaults to today:
 
 ```
 +100 AAPL $182.50                 buy 100 AAPL $182.50
@@ -144,7 +144,7 @@ Shows all active brokerage accounts with their computed balance, cash, and last-
 
 ### Assets
 
-Shows all active assets (stocks, ETFs, mutual funds) with their type, theme, category and latest note.
+Shows the assets you currently hold (non-zero quantity) — stocks, ETFs, mutual funds — with their type, theme, category and latest note. Assets that were sold out are not listed.
 
 - Click **Symbol** to open a Transactions tab for that asset.
 - Select a row to edit the asset in the form below. Fields: Symbol (read-only), Description, Note, Type, Category, Theme.
@@ -208,6 +208,22 @@ Shows the import rules used by **File > Import transactions** to recognize your 
 | Sign | Forces the Amount positive (+1) or negative (−1) |
 
 New databases come with rules for Fidelity and Schwab exports. Add a rule whenever an import reports unrecognized rows, then import the same file again — only the previously unrecognized rows are added.
+
+---
+
+### Dividends (Reports > Dividends)
+
+Shows the dividends received this year (January 1 to today), one row per symbol, largest first:
+
+| Column | Description |
+|---|---|
+| Symbol | Asset ticker — click to open its Transactions |
+| Dividend | Total dividends received this year (transactions of Category Dividend) |
+| Yield | Dividends ÷ the current value of your holding (all accounts) — `—` if you no longer hold the asset |
+
+The **Grand Total** line shows the number of dividend-paying assets, the total dividends, and the average yield weighted by each holding's value.
+
+Above the table there is a checkbox for each account that received dividends this year. Uncheck an account to leave out its dividends (and its holdings from the yield calculation); the table and totals update immediately.
 
 ---
 
@@ -308,15 +324,16 @@ Total — gain/loss since acquisition:
 - Summed across every asset in the report (cost basis is always known locally — no external lookup needed)
 - avgTotal = (ΣValue − ΣCostBasis) / ΣCostBasis × 100
 
-YTD / QTD — gain/loss since a baseline date:
+YTD / 50 Day — gain/loss since a baseline close:
 - Base value per asset = Quantity × BaselinePrice, where BaselinePrice is that asset's price on the first market day
-of the current year (YTD) or current quarter (QTD) — either read from a cached Prices row or fetched once via
-get_chart and cached for next time
+of the current year (YTD) — or, if the asset's stored prices start later (it was issued during the year), its first
+available closing price — and the close 50 trading days before the latest one (50 Day; the earliest stored close when
+fewer are available), all taken from the stored daily prices (no download)
 - Current value per asset = the same Value as above
 - Summed only across assets that have a baseline for that period — an asset with no baseline (new listing, delisted,
 failed lookup) is excluded from that specific average rather than counted as 0%
-- avgYTD/avgQTD = (Σcurrent − Σbase) / Σbase × 100
+- avgYTD/avg50Day = (Σcurrent − Σbase) / Σbase × 100
 
-So Total is comprehensive (every asset always contributes), while YTD/QTD can each silently exclude a different subset
+So Total is comprehensive (every asset always contributes), while YTD/50 Day can each silently exclude a different subset
 of assets depending on baseline availability — which is why it's possible, if a baseline lookup fails for a large
-holding, for YTD/QTD to diverge more than you'd expect from Total.
+holding, for YTD/50 Day to diverge more than you'd expect from Total.

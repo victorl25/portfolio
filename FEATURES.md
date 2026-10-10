@@ -29,7 +29,7 @@ Tools provided by Yahoo Finance MCP server: https://gateway.mcpservers.org/yahoo
   - Input: symbol (required), period1 (start date, required), period2 (end date, optional, defaults to now), interval
   (default 1d; one of 1m 2m 5m 15m 30m 60m 90m 1h 1d 5d 1wk 1mo 3mo — intraday intervals only support recent ranges),
   events (pipe-separated, e.g. div|split), includePrePost (bool, default false)
-  - Used by Tools > Update Prices (daily closes), the Reports tab (YTD/QTD baselines) and Analyze > Assets
+  - Used by Tools > Update Prices (daily closes), the Reports tab (YTD/QTD baselines) and Analyze > Asset performance
 
   4. quote_summary
 

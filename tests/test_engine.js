@@ -1,7 +1,7 @@
 // Engine: option symbols, rule classification, amounts, ledger/options arithmetic, edit/delete/rebuild, snapshots (js/engine.js)
 DB.createNew();
 eq(DB.query('SELECT Schema_Version v FROM Info')[0].v, '2.0', 'schema version');
-eq(DB.query('SELECT COUNT(*) n FROM Rules')[0].n, 21, 'seeded rules');
+eq(DB.query('SELECT COUNT(*) n FROM Rules')[0].n, RULES_SEED.length, 'seeded rules');
 DB.run("INSERT INTO Accounts (Account, Name, Cash) VALUES ('X1','Margin',0),('X2','IRA',0)");
 
 // ── Option symbols
