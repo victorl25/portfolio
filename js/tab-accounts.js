@@ -140,13 +140,18 @@ const AccountsTab = (() => {
 
     if (!account || !name) { await Dialogs.alert('Account and Name are required.'); return; }
 
-    if (_isNew) {
-      DB.run('INSERT INTO Accounts (Account, Name, Cash, Currency, Active) VALUES (?,?,?,?,?)',
-        [account, name, cash, currency, active]);
-    } else {
-      DB.run('UPDATE Accounts SET Account=?, Name=?, Cash=?, Currency=?, Active=? WHERE Account_ID=?',
-        [account, name, cash, currency, active, _selectedRow.Account_ID]);
-    }
+    // Cash changes are recorded in the Balance table (Engine.setCash; no transaction)
+    await DB.transaction(() => {
+      if (_isNew) {
+        DB.run('INSERT INTO Accounts (Account, Name, Cash, Currency, Active) VALUES (?,?,0,?,?)',
+          [account, name, currency, active]);
+        Engine.setCash(DB.query('SELECT last_insert_rowid() AS id')[0].id, cash);
+      } else {
+        DB.run('UPDATE Accounts SET Account=?, Name=?, Currency=?, Active=? WHERE Account_ID=?',
+          [account, name, currency, active, _selectedRow.Account_ID]);
+        Engine.setCash(_selectedRow.Account_ID, cash);
+      }
+    });
     document.getElementById('acc-btn-accept').disabled = true;
     _isNew = false;
     _refresh();

@@ -8,7 +8,9 @@ const Engine = (() => {
   };
   const EFFECTS    = ['Ignore', 'Trade', 'Cash', 'Other', 'Distribution', 'Split', 'Merger', 'Reinvestment', 'RSU'];
   const CATEGORIES = ['Asset', 'Equity', 'Option', 'Dividend', 'Fee', 'Interest', 'Margin', 'Tax', 'Transfer', 'Other'];
-  const NON_CASH_EFFECTS = ['Distribution', 'Split', 'Merger', 'Snapshot', 'RSU'];
+  const NON_CASH_EFFECTS = ['Merger', 'Snapshot', 'RSU'];
+  // Record effects whose Amount is the cost basis from the file (no cash effect; never computed from the price)
+  const BASIS_EFFECTS = ['Distribution', 'Split'];
   const RSU_PRICE_LOOKBACK_DAYS = 7;   // vesting on a weekend/holiday uses the last close before it
   const OPTION_MULTIPLIER = 100;
   const EPS = 1e-9;
@@ -84,11 +86,13 @@ const Engine = (() => {
   }
 
   // Cash impact of a transaction: the file's Amount when available, otherwise
-  // -Quantity × Price (× 100 for options). Non-cash effects are always 0.
+  // -Quantity × Price (× 100 for options). Non-cash effects are always 0; Distribution/Split
+  // keep the file's Amount (their cost basis, Record type so cash is not changed), else 0.
   function resolveAmount({ amount, quantity, price, effect, sign, symbol }) {
     if (NON_CASH_EFFECTS.includes(effect)) return 0;
     let a;
     if (amount != null && isFinite(amount)) a = amount;
+    else if (BASIS_EFFECTS.includes(effect)) a = 0;
     else if (effect !== 'Other' && isFinite(quantity) && isFinite(price))
       a = -quantity * price * (isOption(symbol) ? OPTION_MULTIPLIER : 1);
     else a = 0;
@@ -125,10 +129,12 @@ const Engine = (() => {
         const opening = txn.Amount ? paid * openFraction : newQ * (txn.Price || 0) * mult;
         return { qty: newQ, cost: _round2(opening) };
       }
-      case 'Distribution': return { qty: _roundQ(q + dq), cost: C };
+      // Distribution (e.g. spinoff shares): quantity and the transaction's Amount are added
+      case 'Distribution': return { qty: _roundQ(q + dq), cost: _round2(C + (txn.Amount || 0)) };
       // Vested RSU shares: cost basis = quantity × the stock's closing price on the vesting date (stored as Price)
       case 'RSU':          return { qty: _roundQ(q + dq), cost: _round2(C + dq * (txn.Price || 0)) };
-      case 'Split':        return { qty: _roundQ(dq), cost: C };
+      // Split: quantity and cost basis replaced by the transaction's Quantity and Amount
+      case 'Split':        return { qty: _roundQ(dq), cost: _round2(txn.Amount || 0) };
       case 'Snapshot': {   // Price is per unit; an option contract covers 100 units
         const mult = isOption(txn.Symbol) ? OPTION_MULTIPLIER : 1;
         return { qty: _roundQ(dq), cost: _round2(dq * (txn.Price || 0) * mult) };
@@ -160,7 +166,9 @@ const Engine = (() => {
     return id == null ? null : DB.query(`SELECT * FROM ${table} WHERE ${_idCol(table)}=?`, [id])[0] || null;
   }
 
-  // Marks `prev` (if any) inactive and inserts the new active entry linked to it.
+  // Marks `prev` (if any) inactive and inserts the new active entry linked to it. A Ledger entry's
+  // Date is the date of its reference transaction (the one that triggered the update); manual edits
+  // (no transaction) are dated today.
   function supersede(table, accountId, symbol, prev, qty, cost, transactionId, currency) {
     if (prev) DB.run(`UPDATE ${table} SET Active=0 WHERE ${_idCol(table)}=?`, [prev[_idCol(table)]]);
     const ts = _nowTs();
@@ -173,17 +181,44 @@ const Engine = (() => {
         [prev ? prev.Option_ID : null, transactionId ?? null, ts, accountId, symbol, o.asset, o.expiration, o.strike,
          Math.round(qty), cost, cur]);
     } else {
-      DB.run(`INSERT INTO Ledger (Parent_ID, Transaction_ID, Timestamp, Account_ID, Symbol, Quantity, Cost_Basis, Currency, Active)
-              VALUES (?,?,?,?,?,?,?,?,1)`,
-        [prev ? prev.Holding_ID : null, transactionId ?? null, ts, accountId, symbol, qty, cost, cur]);
+      const date = transactionId != null
+        ? DB.query('SELECT Date FROM Transactions WHERE Transaction_ID=?', [transactionId])[0]?.Date ?? null
+        : ts.slice(0, 10);
+      DB.run(`INSERT INTO Ledger (Parent_ID, Transaction_ID, Date, Timestamp, Account_ID, Symbol, Quantity, Cost_Basis, Currency, Active)
+              VALUES (?,?,?,?,?,?,?,?,?,1)`,
+        [prev ? prev.Holding_ID : null, transactionId ?? null, date, ts, accountId, symbol, qty, cost, cur]);
     }
     return DB.query('SELECT last_insert_rowid() AS id')[0].id;
   }
 
-  function adjustCash(accountId, delta) {
+  // Changes an account's cash by `delta` and records the new balance in the Balance table.
+  // `txn` is the transaction causing the change (its Transaction_ID and Date); without one (manual
+  // change) the record has no Transaction_ID and today's date.
+  function adjustCash(accountId, delta, txn) {
     if (!delta) return;
     DB.run('UPDATE Accounts SET Cash = ROUND(COALESCE(Cash, 0) + ?, 2), Last_Updated = ? WHERE Account_ID = ?',
       [delta, _nowTs(), accountId]);
+    _recordBalance(accountId, txn);
+  }
+
+  // Sets an account's cash to a value (Accounts view); a change is recorded in the Balance table
+  function setCash(accountId, cash) {
+    const cur = DB.query('SELECT COALESCE(Cash, 0) AS Cash FROM Accounts WHERE Account_ID = ?', [accountId])[0];
+    if (!cur) return;
+    adjustCash(accountId, _round2((cash || 0) - cur.Cash));
+  }
+
+  // Supersedes the account's active Balance record with its current Accounts.Cash
+  function _recordBalance(accountId, txn) {
+    const acc  = DB.query('SELECT COALESCE(Cash, 0) AS Cash, Currency FROM Accounts WHERE Account_ID = ?', [accountId])[0];
+    if (!acc) return;
+    const prev = DB.query('SELECT Balance_ID FROM Balance WHERE Account_ID = ? AND Active = 1', [accountId])[0];
+    const ts = _nowTs();
+    if (prev) DB.run('UPDATE Balance SET Active = 0 WHERE Balance_ID = ?', [prev.Balance_ID]);
+    DB.run(`INSERT INTO Balance (Parent_ID, Transaction_ID, Date, Timestamp, Account_ID, Cash, Currency, Active)
+            VALUES (?,?,?,?,?,?,?,1)`,
+      [prev ? prev.Balance_ID : null, txn?.Transaction_ID ?? null, txn?.Date || ts.slice(0, 10), ts, accountId,
+       acc.Cash, txn?.Currency || acc.Currency || 'USD']);
   }
 
   // Applies a stored transaction's position effect on top of the pair's active entry
@@ -201,6 +236,7 @@ const Engine = (() => {
   // Inserts a transaction (fields as in the Transactions table, Type derived from Effect)
   // and returns the stored row.
   function insertTransaction(t) {
+    if (!EFFECT_TYPE[t.Effect]) throw new Error(`Unknown transaction effect "${t.Effect ?? ''}"`);
     const type = t.Type || EFFECT_TYPE[t.Effect] || 'Other';
     const amount = t.Amount ?? 0;
     DB.run(`INSERT INTO Transactions (Account_ID, Date, Type, Category, Effect, Symbol, Quantity, Price, Amount,
@@ -215,7 +251,7 @@ const Engine = (() => {
   // Applies a stored transaction: Ledger/Options update and cash change.
   function applyTransaction(txn) {
     const entryId = _applyPosition(txn);
-    if (_affectsCash(txn)) adjustCash(txn.Account_ID, txn.Amount);
+    if (_affectsCash(txn)) adjustCash(txn.Account_ID, txn.Amount, txn);
     else if (entryId) DB.run('UPDATE Accounts SET Last_Updated=? WHERE Account_ID=?', [_nowTs(), txn.Account_ID]);
     return entryId;
   }
@@ -227,16 +263,111 @@ const Engine = (() => {
     return txn;
   }
 
-  // Edits a stored transaction (VERSION_2.md, Transactions table):
-  // - if the active entry of the pair references it: rebuild the entry from its Parent + edited txn
-  // - otherwise apply the edited transaction in full (warning returned)
-  // - cash changes by the Amount delta.
-  // `changes` holds the edited Transactions columns. Returns { warning }.
-  function editTransaction(old, changes) {
-    const e = { ...old, ...changes };
+  // The edited transaction: `old` with `changes` (undefined = unchanged), symbol normalized, Type and Hash derived
+  function _edited(old, changes) {
+    const e = { ...old };
+    for (const [k, v] of Object.entries(changes || {})) if (v !== undefined) e[k] = v;   // undefined = unchanged
+    if (!EFFECT_TYPE[e.Effect]) throw new Error(`Unknown transaction effect "${e.Effect ?? ''}"`);
     e.Symbol = normalizeSymbol(e.Symbol) || null;
     e.Type = EFFECT_TYPE[e.Effect] || e.Type;
     e.Hash = hash(e.Account_ID, e.Date, e.Symbol, e.Quantity, e.Price, e.Amount);
+    return e;
+  }
+
+  // The record of the active chain of `table` (from `active` back through Parent_ID) that references the
+  // transaction, or null
+  function _chainRecord(table, active, transactionId) {
+    for (let r = active, n = 0; r && n < 100000; r = _entry(table, r.Parent_ID), n++)
+      if (r.Transaction_ID === transactionId) return r;
+    return null;
+  }
+
+  // How editing `old` with `changes` affects the Ledger/Options (checked before saving):
+  //   'none'     — no position-relevant field changed, or the transaction affects no position before or after
+  //   'latest'   — it is the reference transaction of the active entry A of its account + symbol
+  //   'earlier'  — an earlier (inactive) entry of the active chain references it (later transactions follow)
+  //   'unlinked' — it affects a position but no entry of the active chain references it
+  // Returns { impact, table, entry } (entry: A for 'latest', the referencing entry for 'earlier').
+  function editImpact(old, changes) {
+    const e = _edited(old, changes);
+    const changed = ['Account_ID', 'Symbol', 'Quantity', 'Price', 'Amount', 'Effect', 'Date']
+      .some(k => String(old[k] ?? '') !== String(e[k] ?? ''));
+    if (!changed || !(_affectsPosition(old) || _affectsPosition(e))) return { impact: 'none' };
+    if (old.Symbol) {
+      const table = _table(old.Symbol);
+      const active = activeEntry(table, old.Account_ID, old.Symbol);
+      if (active && active.Transaction_ID === old.Transaction_ID) return { impact: 'latest', table, entry: active };
+      const ref = _chainRecord(table, active, old.Transaction_ID);
+      if (ref) return { impact: 'earlier', table, entry: ref };
+    }
+    return { impact: 'unlinked' };
+  }
+
+  // Records of the chain from `start` up to the newest descendant (the active entry), in order
+  function _chainFrom(table, start) {
+    const idCol = _idCol(table), out = [start];
+    for (let cur = start; ; ) {
+      const child = DB.query(`SELECT * FROM ${table} WHERE Parent_ID=? ORDER BY ${idCol} DESC LIMIT 1`, [cur[idCol]])[0];
+      if (!child || out.length > 100000) break;
+      out.push(child); cur = child;
+    }
+    return out;
+  }
+
+  // Recalculates the chain from `start` to the active entry IN PLACE: starting from the state of start's
+  // parent, each record re-applies its reference transaction as currently stored (a transaction that is no
+  // longer valid, or no longer belongs to the record's account + symbol, changes nothing); manual edits
+  // (no Transaction_ID) keep their values. Quantity, Cost_Basis, Date (Ledger) and Timestamp are updated.
+  function _rebuildChain(table, start) {
+    const idCol  = _idCol(table);
+    const parent = _entry(table, start.Parent_ID);
+    let q = parent ? parent.Quantity : 0, C = parent ? parent.Cost_Basis : 0;
+    const ts = _nowTs();
+    for (const r of _chainFrom(table, start)) {
+      let date = r.Date;
+      if (r.Transaction_ID == null) { q = r.Quantity; C = r.Cost_Basis; continue; }
+      const t = DB.query('SELECT * FROM Transactions WHERE Transaction_ID=?', [r.Transaction_ID])[0];
+      if (t && t.Valid && String(t.Account_ID) === String(r.Account_ID) && t.Symbol === r.Symbol && _affectsPosition(t)) {
+        ({ qty: q, cost: C } = nextPosition(q, C, t));
+        date = t.Date;
+      }
+      if (table === 'Options') DB.run('UPDATE Options SET Quantity=?, Cost_Basis=?, Timestamp=? WHERE Option_ID=?', [Math.round(q), C, ts, r[idCol]]);
+      else DB.run('UPDATE Ledger SET Quantity=?, Cost_Basis=?, Date=?, Timestamp=? WHERE Holding_ID=?', [q, C, date, ts, r[idCol]]);
+    }
+  }
+
+  // Replays all valid Trade/Record transactions of one account + symbol (Date order) and supersedes its
+  // active entry with the result (like rebuildAccount, for one asset; manual edits of the pair are discarded).
+  // Without transactions the active entry is deactivated. Returns { qty, cost, transactions } or null.
+  function rebuildPair(accountId, symbol) {
+    if (!symbol) return null;
+    const table = _table(symbol);
+    const txns = DB.query(`SELECT * FROM Transactions WHERE Account_ID=? AND Symbol=? AND Valid=1 AND Type IN ('Trade','Record')
+                           ORDER BY Date, Transaction_ID`, [accountId, symbol]);
+    let q = 0, C = 0, last = null;
+    for (const t of txns) { ({ qty: q, cost: C } = nextPosition(q, C, t)); last = t; }
+    const prev = activeEntry(table, accountId, symbol);
+    if (!last) {
+      if (prev) DB.run(`UPDATE ${table} SET Active=0, Timestamp=? WHERE ${_idCol(table)}=?`, [_nowTs(), prev[_idCol(table)]]);
+      return { qty: 0, cost: 0, transactions: 0 };
+    }
+    supersede(table, accountId, symbol, prev, q, C, last.Transaction_ID, last.Currency);
+    return { qty: q, cost: C, transactions: txns.length };
+  }
+
+  // Edits a stored transaction (VERSION_2.md, Transactions table). `old` is the transaction as it was before
+  // the edit (kept by the caller), `changes` the edited Transactions columns. The transaction is updated in
+  // place and cash changes by the Amount delta. Ledger/Options, by editImpact():
+  // - 'latest': the active entry A is recalculated IN PLACE from its parent B + the edited transaction
+  //   (when the edit moves the transaction to another account/symbol, A falls back to B's state and the
+  //   transaction is applied to the new pair);
+  // - 'earlier' / 'unlinked': nothing more unless opts.rebuild — then 'earlier' recalculates the chain IN
+  //   PLACE from the entry referencing the transaction up to the active entry, and 'unlinked' rebuilds the
+  //   asset's ledger by replaying its transactions (rebuildPair).
+  // Returns { impact, rebuilt }.
+  function editTransaction(old, changes, opts = {}) {
+    const e = _edited(old, changes);
+    const { impact, table, entry } = editImpact(old, changes);
     DB.run(`UPDATE Transactions SET Account_ID=?, Date=?, Type=?, Category=?, Effect=?, Symbol=?, Quantity=?, Price=?,
             Amount=?, Currency=?, Description=?, Hash=? WHERE Transaction_ID=?`,
       [e.Account_ID, e.Date, e.Type, e.Category, e.Effect, e.Symbol, e.Quantity, e.Price, e.Amount, e.Currency,
@@ -245,27 +376,21 @@ const Engine = (() => {
     // Cash: apply the delta (moving to another account reverses the old amount there)
     const oldCash = _affectsCash(old) ? (old.Amount || 0) : 0;
     const newCash = _affectsCash(e) ? (e.Amount || 0) : 0;
-    if (String(old.Account_ID) === String(e.Account_ID)) adjustCash(e.Account_ID, _round2(newCash - oldCash));
-    else { adjustCash(old.Account_ID, -oldCash); adjustCash(e.Account_ID, newCash); }
+    if (String(old.Account_ID) === String(e.Account_ID)) adjustCash(e.Account_ID, _round2(newCash - oldCash), e);
+    else { adjustCash(old.Account_ID, -oldCash, old); adjustCash(e.Account_ID, newCash, e); }
 
-    let warning = false;
-    const positionChanged = ['Account_ID', 'Symbol', 'Quantity', 'Price', 'Amount', 'Effect', 'Date']
-      .some(k => String(old[k] ?? '') !== String(e[k] ?? ''));
-    if (positionChanged && (_affectsPosition(old) || _affectsPosition(e))) {
-      const samePair = String(old.Account_ID) === String(e.Account_ID) && old.Symbol === e.Symbol;
-      const latest = old.Symbol ? activeEntry(_table(old.Symbol), old.Account_ID, old.Symbol) : null;
-      if (samePair && latest && latest.Transaction_ID === old.Transaction_ID) {
-        const table  = _table(e.Symbol);
-        const parent = _entry(table, latest.Parent_ID);
-        if (_affectsPosition(e)) _applyPosition(e, parent);
-        else supersede(table, e.Account_ID, e.Symbol, latest, parent ? parent.Quantity : 0,
-                       parent ? parent.Cost_Basis : 0, e.Transaction_ID, e.Currency);
-      } else {
-        warning = _affectsPosition(old);
-        _applyPosition(e);
-      }
+    const samePair = String(old.Account_ID) === String(e.Account_ID) && old.Symbol === e.Symbol;
+    let rebuilt = false;
+    if (impact === 'latest' || (impact === 'earlier' && opts.rebuild)) {
+      _rebuildChain(table, entry);
+      if (!samePair && _affectsPosition(e)) _applyPosition(e);
+      rebuilt = impact === 'earlier';
+    } else if (impact === 'unlinked' && opts.rebuild) {
+      if (_affectsPosition(e)) rebuildPair(e.Account_ID, e.Symbol);
+      if (!samePair && old.Symbol && _affectsPosition(old)) rebuildPair(old.Account_ID, old.Symbol);
+      rebuilt = true;
     }
-    return { warning };
+    return { impact, rebuilt };
   }
 
   // True if any Ledger or Options entry (active or inactive) references the transaction.
@@ -275,11 +400,29 @@ const Engine = (() => {
       [transactionId, transactionId])[0].n > 0;
   }
 
-  // Invalidates a transaction and reverses its Amount on the cash balance.
-  // Ledger/Options entries are not changed (the caller warns when isReferenced()).
-  function deleteTransaction(txn) {
+  // How deleting a transaction affects the Ledger/Options (checked before deleting), as editImpact():
+  // 'none' (affects no position), 'latest' (reference of the active entry A), 'earlier' (referenced by an
+  // earlier entry of the active chain) or 'unlinked' (affects a position, not referenced by the active chain).
+  function deleteImpact(txn) {
+    if (!_affectsPosition(txn) || !txn.Symbol) return { impact: 'none' };
+    const table = _table(txn.Symbol);
+    const active = activeEntry(table, txn.Account_ID, txn.Symbol);
+    if (active && active.Transaction_ID === txn.Transaction_ID) return { impact: 'latest', table, entry: active };
+    const ref = _chainRecord(table, active, txn.Transaction_ID);
+    return ref ? { impact: 'earlier', table, entry: ref } : { impact: 'unlinked' };
+  }
+
+  // Invalidates a transaction and reverses its Amount on the cash balance. Ledger/Options, by deleteImpact():
+  // 'latest' — the active entry A falls back IN PLACE to the state of its parent; 'earlier' — unchanged unless
+  // opts.rebuild: the chain from the entry referencing the transaction to the active entry is recalculated
+  // IN PLACE without it; 'none'/'unlinked' — unchanged. Returns { impact, rebuilt }.
+  function deleteTransaction(txn, opts = {}) {
+    const { impact, table, entry } = deleteImpact(txn);
     DB.run('UPDATE Transactions SET Valid=0 WHERE Transaction_ID=?', [txn.Transaction_ID]);
-    if (_affectsCash(txn)) adjustCash(txn.Account_ID, -(txn.Amount || 0));
+    if (_affectsCash(txn)) adjustCash(txn.Account_ID, -(txn.Amount || 0), txn);
+    const rebuild = impact === 'latest' || (impact === 'earlier' && !!opts.rebuild);
+    if (rebuild) _rebuildChain(table, entry);
+    return { impact, rebuilt: impact === 'earlier' && rebuild };
   }
 
   // Rebuilds all Ledger and Options entries of an account by replaying its valid
@@ -351,8 +494,8 @@ const Engine = (() => {
     EFFECT_TYPE, EFFECTS, CATEGORIES, OPTION_MULTIPLIER, RSU_PRICE_LOOKBACK_DAYS, priceOn,
     normalizeOption, normalizeSymbol, isOption, parseOption,
     loadRules, classify, resolveAmount, hash, nextPosition,
-    activeEntry, supersede, adjustCash,
-    insertTransaction, applyTransaction, record, editTransaction, isReferenced, deleteTransaction,
+    activeEntry, supersede, adjustCash, setCash,
+    insertTransaction, applyTransaction, record, editImpact, editTransaction, isReferenced, deleteImpact, deleteTransaction, rebuildPair,
     rebuildAccount, applySnapshot
   };
 })();

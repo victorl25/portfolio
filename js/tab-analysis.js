@@ -1,68 +1,71 @@
 const AnalysisTab = (() => {
   let _ctr = 0;
 
-  function openPortfolio() {
+  // Reports > Investments by theme: value per Theme (plus Cash) over the selected accounts
+  function openThemes() {
     const id = `aly-${++_ctr}`;
-    App.Tabs.open(id, 'Portfolio Analysis', panel => _build(panel, id),
+    App.Tabs.open(id, 'Investments by Theme', panel => _build(panel, id),
       { refresh: () => _refresh(id) });
   }
 
-  async function openAccount() {
-    const accountId = await _selectAccountDialog();
-    if (!accountId) return;
-    const acc = DB.query('SELECT Name FROM Accounts WHERE Account_ID=?', [accountId]);
-    const accountName = acc.length ? acc[0].Name : 'Account';
-
-    const id = `aly-${++_ctr}`;
-    App.Tabs.open(id, `Portfolio Analysis — ${accountName}`, panel => _build(panel, id, accountId),
-      { refresh: () => _refresh(id, accountId) });
-  }
-
-  async function _selectAccountDialog() {
-    const accounts = DB.query('SELECT Account_ID, Account, Name FROM Accounts WHERE Active=1 ORDER BY Name');
-    if (!accounts.length) { await Dialogs.alert('No accounts found. Create an account first.'); return null; }
-    const opts = accounts.map(a => `<option value="${a.Account_ID}">${_esc(a.Name)} (${_esc(a.Account)})</option>`).join('');
-    return new Promise(resolve => {
-      const c = Dialogs.custom(`
-        <div class="dlg">
-          <div class="dlg-title">Select Account</div>
-          <div class="dlg-body">
-            <label style="font-size:13px;color:#555;">Account</label>
-            <select class="dlg-select" id="aly-acct-select" style="width:100%;margin-top:4px;">${opts}</select>
-          </div>
-          <div class="dlg-footer">
-            <button class="btn btn-secondary" id="aly-acct-cancel">Cancel</button>
-            <button class="btn btn-primary" id="aly-acct-ok">OK</button>
-          </div>
-        </div>`);
-      c.querySelector('#aly-acct-cancel').addEventListener('click', () => { Dialogs.close(); resolve(null); });
-      c.querySelector('#aly-acct-ok').addEventListener('click', () => {
-        // Coerce to a number — every other accountId in the app comes from a DB.query()
-        // result (already a number); a <select>.value is always a string, and leaving it
-        // as one is the one concrete difference from every other working account-scoped query.
-        const val = Number(c.querySelector('#aly-acct-select').value);
-        Dialogs.close();
-        resolve(val);
-      });
-    });
-  }
-
-  function _build(panel, id, accountId) {
+  function _build(panel, id) {
     panel.innerHTML = `<div id="${id}-wrap" style="height:100%;"></div>`;
-    _render(panel, id, accountId);
+    panel._alyUnchecked = new Set();   // account ids excluded by the user (kept across refreshes)
+    _render(panel, id);
   }
 
-  function _refresh(id, accountId) {
+  function _refresh(id) {
     const panel = document.getElementById(`panel-${id}`);
-    if (panel) _render(panel, id, accountId);
+    if (panel) _render(panel, id);
   }
 
-  function _render(panel, id, accountId) {
+  // Accounts contributing to the report: active accounts with held assets (active Ledger entries,
+  // quantity ≠ 0) or a non-zero cash balance: [{ Account_ID, Name, Account }]
+  function contributingAccounts() {
+    return DB.query(`
+      SELECT Account_ID, Name, Account FROM Accounts a
+      WHERE Active = 1 AND (COALESCE(Cash, 0) <> 0 OR EXISTS
+        (SELECT 1 FROM Ledger l WHERE l.Account_ID = a.Account_ID AND l.Active = 1 AND l.Quantity <> 0))
+      ORDER BY Name, Account_ID`);
+  }
+
+  function _render(panel, id) {
     const wrap = panel.querySelector(`#${id}-wrap`);
-    const { rows, grand, assetCount } = _loadData(accountId);
+    if (!wrap) return;
+    const accounts = contributingAccounts();
+    const checks = accounts.map(a => `
+      <label class="rpt-filter"><input type="checkbox" value="${a.Account_ID}"${panel._alyUnchecked.has(a.Account_ID) ? '' : ' checked'}>
+        ${_esc(a.Name)}${a.Account ? ` <span class="rpt-filter-sub">(${_esc(a.Account)})</span>` : ''}</label>`).join('');
+
+    wrap.innerHTML = `
+      <div class="rpt-report-layout">
+        <div class="rpt-header">
+          <div class="rpt-title">Investments</div>
+          <div class="rpt-subtitle">By Theme</div>
+        </div>
+        ${accounts.length ? `<div class="rpt-filters" id="${id}-accounts"><span class="rpt-filters-label">Accounts:</span>${checks}</div>` : ''}
+        <div id="${id}-table"></div>
+      </div>`;
+
+    wrap.querySelectorAll(`#${id}-accounts input[type=checkbox]`).forEach(cb => cb.addEventListener('change', () => {
+      const accId = Number(cb.value);
+      if (cb.checked) panel._alyUnchecked.delete(accId); else panel._alyUnchecked.add(accId);
+      _renderTable(panel, id, accounts);
+    }));
+    _renderTable(panel, id, accounts);
+  }
+
+  // Recalculates and redraws the table for the checked accounts
+  function _renderTable(panel, id, accounts) {
+    const el = panel.querySelector(`#${id}-table`);
+    if (!el) return;
+    const selected = accounts.filter(a => !panel._alyUnchecked.has(a.Account_ID)).map(a => a.Account_ID);
+    const { rows, grand, assetCount } = computeThemes(selected);
 
     const fmt    = v => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(v || 0);
     const fmtPct = v => grand !== 0 ? (v / grand * 100).toFixed(1) + '%' : '—';
+    const empty  = !accounts.length ? 'No active holdings.'
+                 : !selected.length ? 'No accounts selected.' : 'No holdings in the selected accounts.';
 
     const dataRows = rows.length
       ? rows.map(r => `
@@ -75,81 +78,66 @@ const AnalysisTab = (() => {
           <td class="rpt-col-num">${fmt(r.value)}</td>
           <td class="rpt-col-num">${fmtPct(r.value)}</td>
         </tr>`).join('')
-      : `<tr><td colspan="3" class="rpt-empty">No active holdings.</td></tr>`;
+      : `<tr><td colspan="3" class="rpt-empty">${empty}</td></tr>`;
 
-    let subtitle = 'By Theme';
-    if (accountId) {
-      const acc = DB.query('SELECT Name FROM Accounts WHERE Account_ID=?', [accountId]);
-      subtitle = `By Theme — ${acc.length ? acc[0].Name : 'Account'}`;
-    }
+    el.innerHTML = `
+      <table class="rpt-table">
+        <thead>
+          <tr>
+            <th class="rpt-col-name">Theme</th>
+            <th class="rpt-col-num">Value</th>
+            <th class="rpt-col-num">%Portfolio</th>
+          </tr>
+        </thead>
+        <tbody>${dataRows}</tbody>
+        ${rows.length ? `
+        <tfoot>
+          <tr class="rpt-total-row">
+            <td class="rpt-col-name">Grand Total ${assetCount} Assets</td>
+            <td class="rpt-col-num">${fmt(grand)}</td>
+            <td class="rpt-col-num">${fmtPct(grand)}</td>
+          </tr>
+        </tfoot>` : ''}
+      </table>`;
 
-    wrap.innerHTML = `
-      <div class="rpt-report-layout">
-        <div class="rpt-header">
-          <div class="rpt-title">Portfolio Analysis</div>
-          <div class="rpt-subtitle">${_esc(subtitle)}</div>
-        </div>
-        <table class="rpt-table">
-          <thead>
-            <tr>
-              <th class="rpt-col-name">Theme</th>
-              <th class="rpt-col-num">Value</th>
-              <th class="rpt-col-num">%Portfolio</th>
-            </tr>
-          </thead>
-          <tbody>${dataRows}</tbody>
-          ${rows.length ? `
-          <tfoot>
-            <tr class="rpt-total-row">
-              <td class="rpt-col-name">Grand Total ${assetCount} Assets</td>
-              <td class="rpt-col-num">${fmt(grand)}</td>
-              <td class="rpt-col-num">${fmtPct(grand)}</td>
-            </tr>
-          </tfoot>` : ''}
-        </table>
-      </div>`;
-
-    wrap.querySelector('.rpt-table').addEventListener('click', e => {
+    // A Theme opens the active Ledger entries of that Theme in the checked accounts
+    // (all accounts when none is unchecked, so accounts added later are included too)
+    el.querySelector('.rpt-table').addEventListener('click', e => {
       const link = e.target.closest('.cell-link[data-theme]');
       if (!link) return;
-      PortfolioTab.open(accountId || null, link.dataset.theme);
+      LedgerTab.openFiltered({ theme: link.dataset.theme, accountIds: panel._alyUnchecked.size ? selected : null });
     });
   }
 
-  function _loadData(accountId) {
-    const where  = accountId ? 'l.Active = 1 AND l.Quantity <> 0 AND l.Account_ID = ?' : 'l.Active = 1 AND l.Quantity <> 0';
-    const params = accountId ? [accountId] : [];
-
-    // Assets missing from the Assets table (e.g. a failed lookup) are grouped under "(No Theme)"
+  // Value per Theme over the given accounts (null = all active accounts): held symbols (active Ledger
+  // entries, quantity ≠ 0) × latest price, grouped by the asset's Theme ('' = "(No Theme)", also for symbols
+  // missing from Assets), plus the accounts' cash as a Cash row; sorted by value, largest first.
+  function computeThemes(accountIds) {
+    const ids = accountIds == null ? null : accountIds.map(Number);
+    if (ids && !ids.length) return { rows: [], grand: 0, assetCount: 0 };
+    const accFilter = ids ? `AND l.Account_ID IN (${ids.map(() => '?').join(',')})` : '';
     const assets = DB.query(`
-      SELECT a.Theme,
-        l.Symbol,
-        SUM(l.Quantity) AS Quantity,
-        p.Price
+      SELECT a.Theme, l.Symbol, SUM(l.Quantity) AS Quantity, p.Price
       FROM Ledger l
+      JOIN Accounts acc ON acc.Account_ID = l.Account_ID AND acc.Active = 1
       LEFT JOIN Assets a ON a.Symbol = l.Symbol
       LEFT JOIN v_latest_price p ON l.Symbol = p.Symbol
-      WHERE ${where}
+      WHERE l.Active = 1 AND l.Quantity <> 0 ${accFilter}
       GROUP BY l.Symbol
-      HAVING SUM(l.Quantity) <> 0`, params);
+      HAVING SUM(l.Quantity) <> 0`, ids || []);
 
     const byTheme = new Map();
     for (const a of assets) {
       const key = a.Theme || '';
-      const value = (a.Quantity || 0) * (a.Price || 0);
-      byTheme.set(key, (byTheme.get(key) || 0) + value);
+      byTheme.set(key, (byTheme.get(key) || 0) + (a.Quantity || 0) * (a.Price || 0));
     }
-
-    const cashRes = accountId
-      ? DB.query('SELECT COALESCE(SUM(Cash), 0) AS TotalCash FROM Accounts WHERE Account_ID = ? AND Active = 1', [accountId])
-      : DB.query('SELECT COALESCE(SUM(Cash), 0) AS TotalCash FROM Accounts WHERE Active = 1');
-    const cash = cashRes[0]?.TotalCash || 0;
+    const acc = ids ? `AND Account_ID IN (${ids.map(() => '?').join(',')})` : '';
+    const cash = DB.query(`SELECT COALESCE(SUM(Cash), 0) AS TotalCash FROM Accounts WHERE Active = 1 ${acc}`, ids || [])[0]?.TotalCash || 0;
 
     const rows = [...byTheme.entries()].map(([themeKey, value]) => ({
       themeKey, label: themeKey || '(No Theme)', value, clickable: true
     }));
     if (cash !== 0) rows.push({ themeKey: null, label: 'Cash', value: cash, clickable: false });
-
     rows.sort((a, b) => b.value - a.value);
 
     const grand = rows.reduce((s, r) => s + (r.value || 0), 0);
@@ -624,5 +612,5 @@ const AnalysisTab = (() => {
 
   function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-  return { openPortfolio, openAccount, openAsset, openAssetFor, chartSeries };
+  return { openThemes, computeThemes, contributingAccounts, openAsset, openAssetFor, chartSeries };
 })();

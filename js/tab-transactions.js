@@ -21,7 +21,8 @@ const TransactionsTab = (() => {
   function _build(panel, id, filter) {
     const accounts = DB.query('SELECT Account_ID, Account, Name FROM Accounts WHERE Active=1 ORDER BY Name');
     const accOpts  = accounts.map(a => `<option value="${a.Account_ID}">${_esc(a.Name)} (${_esc(a.Account)})</option>`).join('');
-    const effOpts  = Engine.EFFECTS.filter(e => e !== 'Ignore').map(e => `<option>${e}</option>`).join('');
+    // all stored effects: the rule effects except Ignore, plus Snapshot (holdings recorded by Import holdings)
+    const effOpts  = [...Engine.EFFECTS.filter(e => e !== 'Ignore'), 'Snapshot'].map(e => `<option>${e}</option>`).join('');
     const catOpts  = Engine.CATEGORIES.map(c => `<option>${c}</option>`).join('');
 
     panel.innerHTML = `
@@ -167,35 +168,90 @@ const TransactionsTab = (() => {
         }
       }
 
-      let warning = false;
+      // Editing: `before` is the transaction as it was (the selected row); when the edit changes a position and the
+      // transaction is not the latest one applied to the ledger, the user chooses what to do first
+      const before = _isNew ? null : { ..._selected };
+      let rebuild = false;
+      if (before) {
+        let impact;
+        try { ({ impact } = Engine.editImpact(before, t)); }
+        catch (e) { await Dialogs.alert(`Could not save the transaction: ${(e && e.message) || String(e)}`); return; }
+        if (impact === 'earlier' || impact === 'unlinked') {
+          const choice = await _ledgerChoice(before, impact);
+          if (choice === 'cancel') return;
+          rebuild = choice === 'rebuild';
+        }
+      }
       try {
         if (_isNew) await DB.transaction(() => Engine.record(t));
-        else ({ warning } = await DB.transaction(() => Engine.editTransaction(_selected, t)));
+        else await DB.transaction(() => Engine.editTransaction(before, t, { rebuild }));
       } catch (e) {
-        await Dialogs.alert(`Could not save the transaction: ${e.message}`);
+        await Dialogs.alert(`Could not save the transaction: ${(e && e.message) || String(e)}`);
         return;
       }
       if ((t.Type === 'Trade' || t.Type === 'Record') && t.Symbol && !Engine.isOption(t.Symbol)) await App.ensureAsset(t.Symbol);
       _isNew = false;
       btn('accept').disabled = true;
       App.onDataChanged();
-      if (warning) {
-        await Dialogs.alert('The edited transaction is not the latest one applied to this account + symbol, so it was ' +
-          'applied in full and the original transaction\'s effect remains in the ledger. The ledger might need to be ' +
-          'rebuilt (View > Ledger > Rebuild).', 'Ledger Warning');
-      }
+    }
+
+    // Asks what to do with the ledger when the edited or deleted transaction is not the latest one applied to it:
+    // resolves 'update' (save/delete the transaction only), 'rebuild' (and rebuild the asset's ledger) or 'cancel'
+    function _ledgerChoice(txn, impact, action = 'edit') {
+      const what = `${txn.Symbol || 'the asset'} in ${txn.Name || 'this account'}`;
+      const why = impact === 'earlier'
+        ? `This transaction is not the last one applied to the ledger of ${what}: later transactions were applied after it.`
+        : `This transaction is not applied to the current ledger of ${what}.`;
+      const verb = action === 'delete' ? 'Delete' : 'Update';
+      const onlyText = `${verb} the transaction only (the ledger is not changed)`;
+      const rebuildText = impact === 'earlier'
+        ? `${verb} the transaction and rebuild the ledger of the asset, starting from the ledger record of this transaction`
+        : `${verb} the transaction and rebuild the ledger of the asset from all of its transactions`;
+      return new Promise(resolve => {
+        const c = Dialogs.custom(`
+          <div class="dlg dlg-wide">
+            <div class="dlg-title">${action === 'delete' ? 'Delete' : 'Edit'} Transaction</div>
+            <div class="dlg-body">
+              <p>${_esc(why)}</p>
+              <label class="dlg-choice"><input type="radio" name="txn-ledger-choice" value="update" checked>
+                ${_esc(onlyText)}</label>
+              <label class="dlg-choice"><input type="radio" name="txn-ledger-choice" value="rebuild"> ${_esc(rebuildText)}</label>
+            </div>
+            <div class="dlg-footer">
+              <button class="btn btn-secondary" id="txn-choice-cancel">Cancel</button>
+              <button class="btn btn-primary" id="txn-choice-ok">OK</button>
+            </div>
+          </div>`);
+        c.querySelector('#txn-choice-cancel').addEventListener('click', () => { Dialogs.close(); resolve('cancel'); });
+        c.querySelector('#txn-choice-ok').addEventListener('click', () => {
+          const v = c.querySelector('input[name="txn-ledger-choice"]:checked').value;
+          Dialogs.close();
+          resolve(v);
+        });
+      });
     }
 
     async function _delete() {
       if (!_selected) return;
       const what = `${_selected.Date} ${_selected.Symbol || ''} ${_selected.Description || ''}`.trim();
-      const msg = Engine.isReferenced(_selected.Transaction_ID)
-        ? `The transaction "${what}" is referenced by ledger or option entries. Deleting it does not change those ` +
-          'entries, so the ledger might need to be rebuilt (View > Ledger > Rebuild). Delete the transaction?'
-        : `Delete the transaction "${what}"?`;
-      if (!(await Dialogs.confirm(msg, 'Delete Transaction'))) return;
       const row = DB.query('SELECT * FROM Transactions WHERE Transaction_ID=?', [_selected.Transaction_ID])[0];
-      await DB.transaction(() => Engine.deleteTransaction(row));
+      const { impact } = Engine.deleteImpact(row);
+      let rebuild = false;
+      if (impact === 'earlier') {
+        // not the last transaction applied to the ledger: same choice as for edits
+        const choice = await _ledgerChoice(_selected, impact, 'delete');
+        if (choice === 'cancel') return;
+        rebuild = choice === 'rebuild';
+      } else {
+        const msg = impact === 'latest'
+          ? `Delete the transaction "${what}"? It is the last transaction applied to the ledger of ${_selected.Symbol}, ` +
+            'so the current ledger entry goes back to its state before this transaction.'
+          : impact === 'unlinked'
+            ? `Delete the transaction "${what}"? It is not applied to the current ledger of ${_selected.Symbol}, so the ledger is not changed.`
+            : `Delete the transaction "${what}"?`;
+        if (!(await Dialogs.confirm(msg, 'Delete Transaction'))) return;
+      }
+      await DB.transaction(() => Engine.deleteTransaction(row, { rebuild }));
       _selected = null;
       btn('delete').disabled = true;
       App.onDataChanged();

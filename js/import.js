@@ -180,7 +180,10 @@ const Import = (() => {
 
       const amount = Engine.resolveAmount({ amount: fileAmt, quantity: qty, price, effect: c.effect, sign: c.sign, symbol });
       const h = Engine.hash(accountId, date, symbol || null, qty, price, amount);
-      if (knownHashes.has(h)) { stats.duplicates++; continue; }
+      // Distribution/Split rows imported before their Amount was kept were stored (and hashed) with Amount 0
+      const h0 = amount && (c.effect === 'Distribution' || c.effect === 'Split')
+        ? Engine.hash(accountId, date, symbol || null, qty, price, 0) : null;
+      if (knownHashes.has(h) || (h0 && knownHashes.has(h0))) { stats.duplicates++; continue; }
 
       const affectsPosition = (c.type === 'Trade' || c.type === 'Record') && symbol;
       const prevDate = affectsPosition ? latestDate.get(`${accountId}|${symbol}`) : null;

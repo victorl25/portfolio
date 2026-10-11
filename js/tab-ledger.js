@@ -1,15 +1,33 @@
 // LedgerTab — View > Ledger: active Ledger entries with quantity ≠ 0 (one per account + symbol)
-// with manual editing, deactivation and an account rebuild (VERSION_2.md item 3).
+// with manual editing, deletion (deactivation) and a rebuild of the selected account + symbol (VERSION_2.md item 3).
+// openFiltered() opens extra Ledger tabs limited to an asset Theme and/or a set of accounts
+// (Reports > Investments by theme).
 const LedgerTab = (() => {
   const TAB_ID = 'led';
+  let _ctr = 0;
 
   function open() {
     App.Tabs.open(TAB_ID, 'Ledger', panel => _build(panel, TAB_ID), { refresh: () => _refresh(TAB_ID) });
   }
 
+  // filter: { theme, accountIds } — theme: the Assets.Theme ('' = no theme, also symbols missing from
+  // Assets; undefined/null = any); accountIds: array of Account_IDs (null = all accounts)
+  function openFiltered(filter = {}) {
+    const id = `ldf-${++_ctr}`;
+    const f = { theme: filter.theme ?? null, accountIds: filter.accountIds ? filter.accountIds.map(Number) : null };
+    let label = 'Ledger';
+    if (f.theme !== null) label += ` — ${f.theme || '(No Theme)'}`;
+    if (f.accountIds) {
+      const names = f.accountIds.length ? DB.query(
+        `SELECT Name FROM Accounts WHERE Account_ID IN (${f.accountIds.map(() => '?').join(',')}) ORDER BY Name`, f.accountIds).map(a => a.Name) : [];
+      label += ` (${names.length <= 2 ? names.join(', ') : `${names.length} accounts`})`;
+    }
+    App.Tabs.open(id, label, panel => _build(panel, id, f), { refresh: () => _refresh(id, f) });
+  }
+
   function fld(id, name) { return document.getElementById(`ft-${id}-${name}`); }
 
-  function _build(panel, id) {
+  function _build(panel, id, filter) {
     const accounts = DB.query('SELECT Account_ID, Account, Name FROM Accounts WHERE Active=1 ORDER BY Name');
     const accOpts  = accounts.map(a => `<option value="${a.Account_ID}">${_esc(a.Name)} (${_esc(a.Account)})</option>`).join('');
 
@@ -36,8 +54,8 @@ const LedgerTab = (() => {
             </div>
             <div class="form-col-btns">
               <button class="btn btn-secondary" id="${id}-btn-new">New</button>
-              <button class="btn btn-secondary" id="${id}-btn-deactivate" disabled>Deactivate</button>
-              <button class="btn btn-secondary" id="${id}-btn-rebuild" disabled title="Rebuild the account's ledger from its transactions">Rebuild</button>
+              <button class="btn btn-secondary" id="${id}-btn-delete" disabled title="Delete (deactivate) the selected ledger entry">Delete</button>
+              <button class="btn btn-secondary" id="${id}-btn-rebuild" disabled title="Rebuild the ledger of the selected account + symbol from its transactions">Rebuild</button>
               <div class="btn-spacer"></div>
               <button class="btn btn-primary" id="${id}-btn-accept" disabled>Accept</button>
             </div>
@@ -50,7 +68,7 @@ const LedgerTab = (() => {
     const btn = name => panel.querySelector(`#${id}-btn-${name}`);
 
     const table = new Tabulator(`#${id}-table-wrap`, {
-      data: _loadData(),
+      data: _loadData(filter),
       layout: 'fitColumns',
       selectableRows: 1,
       height: '100%',
@@ -68,11 +86,16 @@ const LedgerTab = (() => {
             return a;
           }
         },
+        { title: 'Date', field: 'Date', headerFilter: true, headerSortTristate: true },
         { title: 'Quantity', field: 'Quantity', headerSortTristate: true, formatter: cell => _fmtNum(cell.getValue()) },
         { title: 'Price', field: 'AvgPrice', headerSortTristate: true,
           formatter: 'money', formatterParams: { decimal: '.', thousand: ',', symbol: '$', precision: 2 } },
         { title: 'Cost Basis', field: 'Cost_Basis', headerSortTristate: true,
-          formatter: 'money', formatterParams: { decimal: '.', thousand: ',', symbol: '$', precision: 2 } }
+          formatter: 'money', formatterParams: { decimal: '.', thousand: ',', symbol: '$', precision: 2 } },
+        { title: 'Value', field: 'Value', headerSortTristate: true, formatter: _fmtValue,
+          tooltip: (e, cell) => { const d = cell.getRow().getData(); return d.LastPrice != null ? `Latest price ${d.LastPrice} (${d.PriceDate})` : 'No stored price'; } },
+        { title: 'Gain / Loss', field: 'GainLoss', headerSortTristate: true, formatter: _fmtGainLoss },
+        { title: '% Gain/Loss', field: 'GainLossPct', headerSortTristate: true, formatter: _fmtPct }
       ]
     });
 
@@ -86,7 +109,7 @@ const LedgerTab = (() => {
     panel.addEventListener('keydown', e => {
       const tag = e.target.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-      if (e.key === 'Delete' && _selected && !_isNew) _deactivate();
+      if (e.key === 'Delete' && _selected && !_isNew) _delete();
     });
 
     btn('new').addEventListener('click', () => {
@@ -100,12 +123,12 @@ const LedgerTab = (() => {
       fld(id, 'qty').value = '';
       fld(id, 'cost').value = '';
       fld(id, 'currency').value = 'USD';
-      btn('deactivate').disabled = true;
+      btn('delete').disabled = true;
       btn('rebuild').disabled = true;
       btn('accept').disabled = false;
     });
     btn('accept').addEventListener('click', _accept);
-    btn('deactivate').addEventListener('click', _deactivate);
+    btn('delete').addEventListener('click', _delete);
     btn('rebuild').addEventListener('click', _rebuild);
     ['account', 'symbol', 'qty', 'cost', 'currency'].forEach(f =>
       fld(id, f).addEventListener('input', () => { btn('accept').disabled = false; }));
@@ -118,7 +141,7 @@ const LedgerTab = (() => {
       fld(id, 'qty').value = row.Quantity;
       fld(id, 'cost').value = row.Cost_Basis;
       fld(id, 'currency').value = row.Currency || 'USD';
-      btn('deactivate').disabled = false;
+      btn('delete').disabled = false;
       btn('rebuild').disabled = false;
       btn('accept').disabled = true;
     }
@@ -144,26 +167,32 @@ const LedgerTab = (() => {
       App.onDataChanged();
     }
 
-    async function _deactivate() {
+    // Delete = deactivate the entry (Active=0); its Timestamp records when it was deleted
+    async function _delete() {
       if (!_selected) return;
       const ok = await Dialogs.confirm(
-        `Deactivate the ledger entry ${_selected.Symbol} (${_fmtNum(_selected.Quantity)}) of ${_selected.Name}?`);
+        `Delete the ledger entry ${_selected.Symbol} (${_fmtNum(_selected.Quantity)}) of ${_selected.Name}?`, 'Delete Ledger Entry');
       if (!ok) return;
-      DB.run('UPDATE Ledger SET Active=0 WHERE Holding_ID=?', [_selected.Holding_ID]);
+      DB.run('UPDATE Ledger SET Active=0, Timestamp=? WHERE Holding_ID=?', [_nowTs(), _selected.Holding_ID]);
       _selected = null;
-      btn('deactivate').disabled = true;
+      btn('delete').disabled = true;
+      btn('rebuild').disabled = true;
       App.onDataChanged();
     }
 
+    // Rebuilds the ledger of the selected account + symbol only (Engine.rebuildPair)
     async function _rebuild() {
       if (!_selected) return;
+      const { Account_ID: accountId, Symbol: symbol, Name: name } = _selected;
       const ok = await Dialogs.confirm(
-        `Rebuild the ledger and options of ${_selected.Name} by replaying its valid transactions? ` +
-        'This discards any manual edits of the account\'s ledger and option entries.', 'Rebuild Ledger');
+        `Rebuild the ledger of ${symbol} in ${name} by replaying its valid transactions? ` +
+        `This discards any manual edits of this ${symbol} ledger entry.`, 'Rebuild Ledger');
       if (!ok) return;
       try {
-        const counts = await DB.transaction(() => Engine.rebuildAccount(_selected.Account_ID));
-        await Dialogs.alert(`Rebuilt ${counts.ledger} ledger and ${counts.options} option entr${counts.options === 1 ? 'y' : 'ies'}.`, 'Rebuild Ledger');
+        const r = await DB.transaction(() => Engine.rebuildPair(accountId, symbol));
+        await Dialogs.alert(r && r.transactions
+          ? `Rebuilt ${symbol} in ${name} from ${r.transactions} transaction(s): quantity ${_fmtNum(r.qty)}, cost basis ${r.cost.toFixed(2)}.`
+          : `${symbol} has no valid transactions in ${name}; its ledger entry was deleted.`, 'Rebuild Ledger');
       } catch (e) {
         await Dialogs.alert(`Rebuild failed, no changes were made: ${e.message}`);
       }
@@ -173,19 +202,62 @@ const LedgerTab = (() => {
     panel._ledTable = table;
   }
 
-  function _loadData() {
+  // Active entries with quantity ≠ 0, optionally limited to a Theme and/or accounts (see openFiltered).
+  // Value = Quantity × the latest stored price (v_latest_price), Gain/Loss = Value − Cost_Basis,
+  // % Gain/Loss = Gain/Loss / |Cost_Basis| × 100 (abs: shorts have a negative basis; NULL for basis 0);
+  // all NULL when the symbol has no stored price.
+  function _loadData(filter) {
+    const params = [];
+    let themeJoin = '', accFilter = '';
+    if (filter && filter.theme != null) {
+      themeJoin = 'LEFT JOIN Assets s ON s.Symbol = l.Symbol';
+      if (filter.theme === '') accFilter += " AND (s.Theme IS NULL OR s.Theme = '')";
+      else { accFilter += ' AND s.Theme = ?'; params.push(filter.theme); }
+    }
+    if (filter && filter.accountIds) {
+      if (!filter.accountIds.length) return [];
+      accFilter += ` AND l.Account_ID IN (${filter.accountIds.map(() => '?').join(',')})`;
+      params.push(...filter.accountIds);
+    }
     return DB.query(`
-      SELECT l.Holding_ID, l.Account_ID, a.Name, l.Symbol, l.Quantity, l.Cost_Basis, l.Currency,
-        CASE WHEN l.Quantity <> 0 THEN l.Cost_Basis / l.Quantity END AS AvgPrice
+      SELECT l.Holding_ID, l.Account_ID, a.Name, l.Symbol, l.Date, l.Quantity, l.Cost_Basis, l.Currency,
+        CASE WHEN l.Quantity <> 0 THEN l.Cost_Basis / l.Quantity END AS AvgPrice,
+        p.Price AS LastPrice, p.Date AS PriceDate,
+        ROUND(l.Quantity * p.Price, 2) AS Value,
+        ROUND(l.Quantity * p.Price - l.Cost_Basis, 2) AS GainLoss,
+        CASE WHEN l.Cost_Basis <> 0 THEN (l.Quantity * p.Price - l.Cost_Basis) / ABS(l.Cost_Basis) * 100 END AS GainLossPct
       FROM Ledger l
       JOIN Accounts a ON a.Account_ID = l.Account_ID
-      WHERE l.Active = 1 AND l.Quantity <> 0
-      ORDER BY a.Name, l.Symbol`);
+      LEFT JOIN v_latest_price p ON p.Symbol = l.Symbol
+      ${themeJoin}
+      WHERE l.Active = 1 AND l.Quantity <> 0 ${accFilter}
+      ORDER BY a.Name, l.Symbol`, params);
   }
 
-  function _refresh(tabId) {
+  function _refresh(tabId, filter) {
     const panel = document.getElementById(`panel-${tabId}`);
-    if (panel && panel._ledTable) panel._ledTable.replaceData(_loadData());
+    if (panel && panel._ledTable) panel._ledTable.replaceData(_loadData(filter));
+  }
+
+  function _fmtValue(cell) {
+    const v = cell.getValue();
+    return v == null ? '—' : '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  // Signed and colored like the Portfolio tab's Gain / Loss column; — without a stored price
+  function _fmtGainLoss(cell) {
+    const v = cell.getValue();
+    if (v == null) return '—';
+    cell.getElement().style.color = v < 0 ? '#c0392b' : v > 0 ? '#27ae60' : '';
+    return (v < 0 ? '-' : v > 0 ? '+' : '') + '$' +
+      Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function _fmtPct(cell) {
+    const v = cell.getValue();
+    if (v == null) return '—';
+    cell.getElement().style.color = v < 0 ? '#c0392b' : v > 0 ? '#27ae60' : '';
+    return (v > 0 ? '+' : '') + v.toFixed(2) + '%';
   }
 
   function _fmtNum(v) {
@@ -194,5 +266,5 @@ const LedgerTab = (() => {
 
   function _esc(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
-  return { open };
+  return { open, openFiltered, loadData: _loadData };
 })();

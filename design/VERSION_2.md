@@ -29,9 +29,9 @@ Version 2 will implement a substatial refactoring of the application and feature
 ## Schema changes
 
 Info table will be added - database metadata, a single record:
-- Schema_Version (version of the database schema, text, e.g. "2.0")
+- Schema_Version (version of the database schema, text, e.g. "2.3")
 
-The Schema_Version is set when a new database is created. When a database is opened, the application reads the Schema_Version to check compatibility. Databases created before version 2.0 (without the Info table) are not migrated: the application refuses to open them and shows an explanation. In that case (including the automatic load at startup) the application continues with a new empty database. Future schema changes increment the Schema_Version and add an upgrade step from the previous 2.x version.
+The Schema_Version is set when a new database is created. When a database is opened, the application reads the Schema_Version to check compatibility. Databases created before version 2.0 (without the Info table) are not migrated: the application refuses to open them and shows an explanation. In that case (including the automatic load at startup) the application continues with a new empty database. Future schema changes increment the Schema_Version and add an upgrade step from the previous 2.x version. Version 2.1 adds the Ledger Date column: a 2.0 database is upgraded when it is opened by adding the column and populating it for all ledger records (active and inactive) with the date of their reference transaction (manual edits without a reference transaction use the date of their timestamp); the upgraded database is saved as 2.1 with the next Save. Version 2.2 has no schema change: Split and Distribution transactions keep the import file's Amount as their cost basis, and the 2.1 → 2.2 upgrade replaces the old seeded descriptions of the DISTRIBUTION and REVERSE SPLIT rules (if unchanged) with the new ones. Version 2.3 adds the Balance table (below): a 2.2 database is upgraded by replaying all recorded transactions that change cash (valid, Type Cash or Trade, Amount ≠ 0) per account in chronological order, creating one Balance record per transaction; if the result differs from the account's Cash (manual edits), a final record without a transaction brings it to the account's Cash. Older databases are upgraded step by step (2.0 → 2.1 → 2.2 → 2.3).
 
 Accounts table - there are no changes to the Accounts table
 
@@ -53,9 +53,9 @@ Transactions table will be added:
 - Valid (flag whether the transaction is valid, default is yes, invalid transactions are considered deprecated)
 
 Transactions can be edited or deleted in the Transactions view:
-- Edit - if the active Ledger (or Options) entry for the transaction's account + symbol references the edited transaction, that entry is marked inactive and a new entry is built from its Parent entry plus the edited transaction. Otherwise the edited transaction is applied in full, the same way as a newly imported transaction; the original transaction's effect remains in the ledger, so a warning is displayed that the ledger might need to be rebuilt.
+- Edit - a copy of the transaction before the changes is kept in memory and the transaction is updated in place. If the active Ledger (or Options) entry A for the transaction's account + symbol references the edited transaction, the edited transaction is applied to A's parent entry B and the result replaces A in place (no new entry). If the transaction is not the last one applied to the current ledger, the user chooses: a) update the transaction only, b) update the transaction and rebuild the ledger of the asset starting from the ledger record referencing the modified transaction (records recalculated in place up to the active entry; when no ledger record references it, the asset's ledger is rebuilt from all of its transactions), or c) cancel.
 - Cash - if the Amount of a transaction is edited, the delta (new Amount - previous Amount) is applied to the account's cash balance.
-- Delete - the transaction is marked invalid (Valid = 0). If the transaction is referenced by any Ledger or Options entry (active or inactive), a warning is displayed that the ledger might need to be rebuilt and the user is asked to confirm the deletion. The Ledger and Options entries are not changed automatically, but the deleted transaction's Amount is reversed on the account's cash balance (the Amount is subtracted from the balance).
+- Delete - the transaction is marked invalid (Valid = 0) and its Amount is reversed on the cash balance. If it is the reference transaction of the active Ledger (or Options) entry, that entry is replaced in place by the state of its parent entry. If it is not the last transaction applied to the current ledger, the user gets the same choice as for edits: a) delete the transaction only, b) delete it and rebuild the ledger of the asset starting from the ledger record referencing it (records recalculated in place without it), or c) cancel.
 
 Assets table - notes are extracted from the Assets table and moved to a separate table called Notes.
 
@@ -75,6 +75,7 @@ Ledger table - current snapshot of held equity positions, one active record per 
 - Holding_ID (primary key, integer, auto increment)
 - Parent_ID (foreign key to the Ledger table, parent ledger entry, nullable)
 - Transaction_ID (foreigh key to the Transactions table, link to the last transaction that modified the ledger entry)
+- Date (date of the reference transaction — the transaction that triggered the update of the ledger entry — `YYYY-MM-DD`, indexed; manual edits are dated on the day of the edit; added in schema version 2.1)
 - Timestamp (datetime stamp of the ledger record `YYYY-MM-DD HH:MM:SS`, indexed)
 - Account_ID (foreign key to Accounts table, indexed)
 - Symbol (asset symbol can include stock, ETF, mutual fund)
@@ -98,6 +99,19 @@ Ledger entries are updated when a Trade or Record transaction is added. Each act
 If a ledger entry's quantity becomes 0, the entry remains active (a later transaction for the same account + symbol supersedes it); entries with quantity 0 are not shown in the Portfolio and Ledger views, are not considered by Update Prices, and are excluded from reports.
 
 The ledger of an account can be rebuilt by replaying the valid transactions of each account + symbol pair in chronological order, on a special request from the Ledger view. A warning is displayed before the rebuild that it discards any manual edits of the account's ledger entries. The recalculated ledger entries supersede the existing entries. Ledger entries can also be manually edited via the form on the Ledger view.
+
+Balance table (since 2.3) - cash balance history of each account; behaves like the Ledger table, one active record per account:
+- Balance_ID (primary key)
+- Parent_ID (foreign key to the Balance table, previous balance record, nullable)
+- Transaction_ID (foreign key to the Transactions table, the transaction that changed the balance; NULL for manual changes in the Accounts view)
+- Date (date of that transaction, `YYYY-MM-DD`; manual changes: the day of the change)
+- Timestamp (time the record was written)
+- Account_ID (foreign key to the Accounts table)
+- Cash (the account's cash balance after the change)
+- Currency
+- Active (1 for the current record of the account)
+
+Every transaction that changes an account's cash balance (recorded, edited or deleted) creates a new Balance record that supersedes the active one (marked inactive and referenced via Parent_ID). The active record always equals Accounts.Cash.
 
 Options table will be added - current snapshot of held option positions, one active record per account + option symbol slot (works the same way as the Ledger table):
 - Option_ID (primary key, integer, auto increment)
@@ -139,8 +153,9 @@ Rules table will be added - import rules used to interpret the Action column of 
     - Trade - a new entry type=Trade is created in the Transactions table to reflect equity/option trade (); the Ledger or Options table is updated to reflect asset changes, and the account's cash balance is changed by the transaction Amount. 
     - Cash - a new entry type=Cash created in the Transaction table and the account's cash balance is changed by the Amount; Ledger and Options are not affected
     - Other - a new entry type=Other created in the Transaction table and nothing else is affected
-    - Distribution - a new entry type=Record created in the Transactions table, the transaction Amount is set to 0 regardless of the import data, Ledger or Options are updated to _adjust_ the symbol's quantity by the transaction quantity (new entries are created if they don't exist for the symbol) and the cost basis is kept the same as in the parent ledger entry, or set to 0 if a new ledger entry.
-    - Split - a new entry type=Record is created in the Transactions table, the transaction Amount is set to 0 regardless of the import data, Ledger or Options are updated to _replace_ the symbol's quantity with the transaction quantity (new etries are created if they don't exists for the symbol) and the cost basis is kept the same or set to 0 if a new ledger entry.
+    - Distribution - a new entry type=Record created in the Transactions table with the import data's Amount (0 when the file has none; never computed from the price; cash is not changed), Ledger or Options are updated to _add_ the transaction quantity to the symbol's quantity and the transaction Amount to its cost basis (new entries are created if they don't exist for the symbol, starting from 0).
+    - Split - a new entry type=Record is created in the Transactions table with the import data's Amount (0 when the file has none; cash is not changed), Ledger or Options are updated to _replace_ the symbol's quantity with the transaction quantity and its cost basis with the transaction Amount (new entries are created if they don't exist for the symbol).
+    - Distribution/Split rows imported before the Amount was kept were stored and hashed with Amount 0; re-importing them is still detected as a duplicate (the hash with Amount 0 is checked too).
     - Merger - a new entry type=Other is created in the Transactions table, the transaction Amount is set to 0 regardless of the import data
     - RSU - vested restricted stock units: a new entry type=Record is created in the Transactions table, the transaction Amount is set to 0 regardless of the import data (no cash is paid), and the Ledger is updated to _add_ the transaction quantity (a new entry is created if it doesn't exist for the symbol). The cost basis of the vested shares is calculated from the asset (stock) price on the transaction date times the quantity and added to the parent entry's cost basis. The price is the stock's daily closing price on the transaction date from the Prices table (the last close within the 7 days before it when the date is not a trading day); if it is not stored yet, it is retrieved with the Yahoo Finance MCP get_chart tool before the import and added to the Prices table. The price used is stored as the transaction's Price (the price column of the import file is ignored), so edits and ledger rebuilds use the same cost basis. If no price can be found, the transaction is recorded with an empty Price (cost basis 0) and listed in the import summary so the price can be entered in the Transactions view. No RSU rule is pre-populated; RSU rules are added in the Rules view for the broker's vesting Action text.
     - Reinvestment - a new entry type=Trade is created in the Transactions table and handled as Trade (e.g. dividend reinvestment buys more shares). Reinvestments into cash-like assets such as SPAXX or FDRXX are matched by a separate rule ordered before the generic REINVESTMENT rule (rule 45) with the Effect Other, so they are recorded with type=Other and nothing else is affected; the list of cash-like assets can be edited in that rule.
@@ -159,27 +174,35 @@ The Rules table is pre-populated with the following rules when a new database is
 
 | Order | Pattern | Case sensitive | Symbol required | Category | Effect | Sign | Description |
 |---|---|---|---|---|---|---|---|
-| 10 | `^(JOURNALED)` | yes | no | Other | Ignore | | journaling transactions |
-| 20 | `^(DIVIDEND)` | yes | yes | Dividend | Cash | | cash dividend |
-| 30 | `^(YOU BOUGHT)` | yes | yes | Asset | Trade | | equity/option purchase |
-| 40 | `^(YOU SOLD)` | yes | yes | Asset | Trade | | equity/option sale |
-| 45 | `^(REINVESTMENT).*\((SPAXX\|FDRXX\|FZFXX\|SWVXX)\)` | yes | yes | Other | Other | | reinvestment into a cash-like money market fund, recorded only |
-| 50 | `^(REINVESTMENT)` | yes | yes | Asset | Reinvestment | | reinvestment transactions |
-| 60 | `^(DISTRIBUTION)` | yes | yes | Asset | Distribution | | new shares distributed (e.g. spinoff); Amount is 0, quantity is added, cost basis is kept from the parent entry (0 for a new entry) |
-| 70 | `^(EXPIRED)` | yes | yes | Other | Other | | expired options, the expiration date already provides the necessary info |
-| 80 | `^(REVERSE SPLIT)` | yes | yes | Asset | Split | | reverse split; the transaction quantity replaces the held quantity, cost basis is kept |
-| 90 | `^(MERGER)` | yes | yes | Asset | Merger | | merger, a new asset symbol is likely but the cost basis could be tricky |
-| 100 | `^(Buy)` | yes | yes | Asset | Trade | | equity/option purchase |
-| 110 | `^(Sell)` | yes | yes | Asset | Trade | | equity/option sale |
-| 112 | `^(ASSIGNED)` | yes | yes | Asset | Other | | option assignment, recorded only; the resulting share sale is reported separately (e.g. YOU SOLD) |
-| 114 | `^(EXERCISED)` | yes | yes | Asset | Other | | option exercise, recorded only; the resulting share purchase is reported separately (e.g. YOU BOUGHT) |
-| 120 | `^(.+)(Dividend)` | yes | yes | Dividend | Cash | | cash dividend |
-| 130 | `^(ADR Mgmt Fee)` | yes | yes | Fee | Cash | | ADR management fee |
-| 140 | `^(Margin Interest)` | yes | no | Margin | Cash | | margin interest |
-| 150 | `^(Credit Interest)` | yes | no | Interest | Cash | | cash interest |
+| 10 | `^(JOURNALED)` | yes | no | Other | Ignore |  | journaling transactions |
+| 20 | `^(DIVIDEND)` | yes | yes | Dividend | Cash |  | cash dividend |
+| 25 | `^(YOU BOUGHT RSU)` | yes | yes | Asset | RSU |  | record transaction for vesting RSUs |
+| 30 | `^(YOU BOUGHT)` | yes | yes | Asset | Trade |  | equity/option purchase |
+| 40 | `^(YOU SOLD)` | yes | yes | Asset | Trade |  | equity/option sale |
+| 45 | `^(REINVESTMENT).*\((SPAXX\|FDRXX\|FZFXX\|SWVXX)\)` | yes | yes | Other | Other |  | reinvestment into a cash-like money market fund, recorded only |
+| 50 | `^(REINVESTMENT)` | yes | yes | Asset | Reinvestment |  | reinvestment transactions |
+| 60 | `^(DISTRIBUTION)` | yes | yes | Asset | Distribution |  | new shares distributed (e.g. spinoff); quantity and Amount are added to the quantity and cost basis, no cash effect |
+| 70 | `^(EXPIRED)` | no | yes | Other | Other |  | expired options, the expiration date already provides the necessary info |
+| 80 | `^(REVERSE SPLIT)` | yes | yes | Asset | Split |  | reverse split; the transaction quantity and Amount replace the held quantity and cost basis, no cash effect |
+| 90 | `^(MERGER)` | yes | yes | Asset | Merger |  | merger, a new asset symbol is likely but the cost basis could be tricky |
+| 100 | `^(Buy)` | yes | yes | Asset | Trade |  | equity/option purchase |
+| 110 | `^(Sell)` | yes | yes | Asset | Trade |  | equity/option sale |
+| 112 | `^(ASSIGNED)` | yes | yes | Asset | Other |  | option assignment, recorded only; the resulting share sale is reported separately (e.g. YOU SOLD) |
+| 114 | `^(EXERCISED)` | yes | yes | Asset | Other |  | option exercise, recorded only; the resulting share purchase is reported separately (e.g. YOU BOUGHT) |
+| 120 | `^(.+)(Dividend)` | yes | yes | Dividend | Cash |  | cash dividend |
+| 130 | `^(ADR Mgmt Fee)` | yes | yes | Fee | Cash |  | ADR management fee |
+| 140 | `^(Margin Interest)` | no | no | Margin | Cash |  | margin interest |
+| 150 | `^(Credit Interest)` | no | no | Interest | Cash |  | cash interest |
 | 160 | `^(FOREIGN TAX)` | yes | yes | Tax | Cash | -1 | foreign tax withheld from dividends |
 | 170 | `^(Deposit)` | no | no | Transfer | Cash | +1 | cash deposit into the account |
 | 180 | `^(Withdrawal)` | no | no | Transfer | Cash | -1 | cash withdrawal from the account |
+| 200 | `^(SHORT VS MARGIN)` | yes | no | Other | Ignore |  | journaling of margin positions |
+| 210 | `^(Change in Market Value)` | yes | no | Other | Ignore |  | change of market value record |
+| 220 | `^(Dividend)` | yes | no | Dividend | Cash |  | cash dividend |
+| 230 | `^(DIRECT DEPOSIT)` | yes | no | Transfer | Cash |  | direct deposit |
+| 240 | `^(Exchange)\s+(In\|Out)` | yes | no | Other | Ignore |  | exchange of assets in a managed account |
+| 250 | `^(FEE)` | no | no | Fee | Cash |  | fee charged |
+| 260 | `^(.*)(Cash Div)` | yes | no | Dividend | Cash |  | cash dividend |
 
 Transfer transactions are cash flows into or out of the portfolio, not gains or losses, and should be excluded when calculating portfolio performance (e.g. YTD or 1 year change).
 
@@ -243,5 +266,5 @@ Transfer transactions are cash flows into or out of the portfolio, not gains or 
 ## Deferred to a later version
 
 The following objectives are not implemented in version 2.0; the data needed for them (transactions, ledger history, daily prices) is collected so they can be added later:
-- realized taxable gains and losses report
+- realized taxable gains and losses report — since implemented as Reports > Gains/Losses (short/long-term gains per asset, lots matched last in, first out per account)
 - portfolio balance history / trend chart

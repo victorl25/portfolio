@@ -38,7 +38,7 @@ const firstIdx = bal.findIndex(b => isFinite(b));
 let lastIdx = -1; bal.forEach((b, i) => { if (isFinite(b)) lastIdx = i; });
 const expected = Math.round((bal[lastIdx] - (bal[firstIdx] - amt[firstIdx])) * 100) / 100;
 eq(Math.round(cash(1) * 100) / 100, expected, 'Fidelity: cash change equals Cash Balance column change');
-eq([led(1, 'HON').Quantity, led(1, 'HONA').Quantity, led(1, 'HONA').Cost_Basis], [0, 500, 0], 'HON split then sold 500; HONA distributed at cost 0');
+eq([led(1, 'HON').Quantity, led(1, 'HONA').Quantity, led(1, 'HONA').Cost_Basis], [0, 500, 110095], 'HON split then sold 500; HONA distributed at the Amount (110095)');
 eq(Engine.activeEntry('Options', 1, 'NVDA20270115C360').Quantity, 20, 'NVDA closing buy recorded on Options');
 eq(DB.query("SELECT Type, Effect FROM Transactions WHERE Symbol='SPAXX' ORDER BY Effect").map(r => r.Type + '/' + r.Effect),
    ['Cash/Cash', 'Cash/Cash', 'Cash/Cash', 'Other/Other', 'Other/Other', 'Other/Other'], 'SPAXX dividends are Cash, reinvestments are Other');
@@ -154,3 +154,19 @@ eq(DB.query("SELECT Symbol, Category, Quantity FROM Transactions WHERE Symbol LI
 const anet = Engine.activeEntry('Options', 1, 'ANET20260102C137');
 eq([anet.Quantity, anet.Asset, anet.Expiration_Date, anet.Strike, led(1, 'ANET 01/02/2026 137.00 C')], [-2, 'ANET', '2026-01-02', 137, null],
    'option position recorded on the Options table, not the Ledger');
+
+// ── Split / Distribution: the file's Amount is the cost basis; rows imported earlier with Amount 0 are duplicates
+DB.createNew();
+DB.run("INSERT INTO Accounts (Account, Name, Cash) VALUES ('X1','Fidelity',1000)");
+const sdMap = { Date: m('Date'), Action: m('Action'), Symbol: m('Symbol'), Quantity: m('Quantity'), Price: m('Price'), Amount: m('Amount') };
+const sdCsv = 'Date,Action,Symbol,Quantity,Price,Amount\n'
+  + '06/01/2026,YOU BOUGHT HONEYWELL,HON,1000,232.21,-232210\n'
+  + '06/29/2026,REVERSE SPLIT R/S FROM HON,HON,500,,113900\n'
+  + '06/29/2026,DISTRIBUTION SPINOFF HONA,HONA,500,,110095\n';
+Engine.record({ Account_ID: 1, Date: '2026-06-23', Effect: 'Distribution', Category: 'Equity', Symbol: 'SMERY', Quantity: 4000,
+  Price: null, Amount: 0, Hash: Engine.hash(1, '2026-06-23', 'SMERY', 4000, null, 0) });   // imported before: Amount 0
+res = Import.processTransactions(Import.prepareRows(Import.parseCsv(sdCsv
+  + '06/23/2026,DISTRIBUTION SIEMENS ENERGY,SMERY,4000,,146740\n'), sdMap, true), sdMap, () => 1);
+eq([res.stats.imported, res.stats.duplicates], [3, 1], 'distribution stored earlier with Amount 0: duplicate');
+eq([led(1, 'HON').Quantity, led(1, 'HON').Cost_Basis, led(1, 'HONA').Quantity, led(1, 'HONA').Cost_Basis, cash(1)],
+   [500, 113900, 500, 110095, 1000 - 232210], 'split replaces quantity and cost basis, distribution adds both; cash unchanged by them');

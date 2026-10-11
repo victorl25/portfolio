@@ -28,7 +28,6 @@ const PricesTab = (() => {
               </div>
             </div>
             <div class="form-col-btns">
-              <button class="btn btn-secondary" id="prc-btn-update" disabled>Update</button>
               <div class="btn-spacer"></div>
               <button class="btn btn-primary" id="prc-btn-accept" disabled>Accept</button>
             </div>
@@ -54,7 +53,15 @@ const PricesTab = (() => {
         { title: 'Description', field: 'Description', headerFilter: true, headerSortTristate: true },
         { title: 'Price', field: 'Price', headerSortTristate: true,
           formatter: 'money', formatterParams: { decimal: '.', thousand: ',', symbol: '$', precision: 2 } },
-        { title: 'Date', field: 'Date', headerSortTristate: true }
+        { title: 'Date', field: 'Date', headerSortTristate: true },
+        // Update: stores the symbol's daily closes like Tools > Update prices (updateSymbolPrices in app.js)
+        { title: 'Action', field: 'Symbol', width: 90, hozAlign: 'center', headerSort: false,
+          formatter: () => `<button class="act-btn analyze-btn">Update</button>`,
+          cellClick: (e, cell) => {
+            if (!e.target.classList.contains('act-btn')) return;
+            _updateRow(cell.getRow().getData().Symbol, e.target);
+          }
+        }
       ]
     });
 
@@ -65,7 +72,6 @@ const PricesTab = (() => {
       document.getElementById('prc-f-desc').value     = _selectedRow.Description || '';
       document.getElementById('prc-f-price').value    = _selectedRow.Price       != null ? _selectedRow.Price : '';
       document.getElementById('prc-f-currency').value = _selectedRow.Currency    || 'USD';
-      document.getElementById('prc-btn-update').disabled = false;
       document.getElementById('prc-btn-accept').disabled = true;
     });
 
@@ -73,38 +79,47 @@ const PricesTab = (() => {
       document.getElementById('prc-btn-accept').disabled = false;
     });
 
-    document.getElementById('prc-btn-update').addEventListener('click', _update);
     document.getElementById('prc-btn-accept').addEventListener('click', _accept);
   }
 
+  // Every active asset with its description and latest price (Price/Date empty when no price is stored),
+  // plus symbols that have prices but no Assets row — an outer join of Assets and the latest prices
   function _loadData() {
     return DB.query(`
-      SELECT lp.Symbol, a.Description, lp.Price, lp.Date, p.Currency
+      SELECT a.Symbol, a.Description, lp.Price, lp.Date, p.Currency
+      FROM Assets a
+      LEFT JOIN v_latest_price lp ON lp.Symbol = a.Symbol
+      LEFT JOIN Prices p ON p.Symbol = lp.Symbol AND p.Date = lp.Date
+      WHERE a.Active = 1
+      UNION ALL
+      SELECT lp.Symbol, NULL, lp.Price, lp.Date, p.Currency
       FROM v_latest_price lp
       JOIN Prices p ON p.Symbol = lp.Symbol AND p.Date = lp.Date
-      LEFT JOIN Assets a ON lp.Symbol = a.Symbol
-      ORDER BY lp.Symbol`);
+      WHERE NOT EXISTS (SELECT 1 FROM Assets a WHERE a.Symbol = lp.Symbol)
+      ORDER BY 1`);
   }
 
-  async function _update() {
-    if (!_selectedRow) return;
-    const btn = document.getElementById('prc-btn-update');
-    btn.disabled = true;
-    btn.textContent = '…';
+  // Action column Update: fetches and stores the symbol's daily closes (same logic as Tools > Update prices)
+  async function _updateRow(symbol, button) {
+    if (button.disabled) return;
+    button.disabled = true;
+    button.textContent = '…';
+    let r;
     try {
-      const quote = await YahooFinance.getQuote(_selectedRow.Symbol);
-      const price = quote.regularMarketPrice ?? quote.regularMarketPreviousClose;
-      if (price != null && !isNaN(price)) {
-        document.getElementById('prc-f-price').value = Math.round(price * 100) / 100;
-        document.getElementById('prc-btn-accept').disabled = false;
-      } else {
-        await Dialogs.alert('Price not available for this symbol.');
-      }
+      r = await updateSymbolPrices(symbol, attempt => { button.textContent = `retry ${attempt}`; });
     } catch (e) {
-      await Dialogs.alert(`Failed to retrieve price: ${e.message}`);
+      r = { reason: e.message };
     }
-    btn.textContent = 'Update';
-    btn.disabled = false;
+    button.disabled = false;
+    button.textContent = 'Update';
+    if (r.limited) {
+      await Dialogs.alert(`The Yahoo Finance server kept returning "Too Many Requests" for ${symbol} (${PRICE_MAX_ATTEMPTS} attempts). Try again later.`, 'Update Price');
+    } else if (r.reason) {
+      await Dialogs.alert(`Failed to update ${symbol}: ${r.reason}`, 'Update Price');
+    } else {
+      _refresh();
+      App.onDataChanged();
+    }
   }
 
   async function _accept() {
@@ -121,5 +136,5 @@ const PricesTab = (() => {
     if (_table) _table.replaceData(_loadData());
   }
 
-  return { open, refresh: _refresh };
+  return { open, refresh: _refresh, loadData: _loadData };
 })();

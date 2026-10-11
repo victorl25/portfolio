@@ -58,4 +58,30 @@ const candles = (...rows) => ({ quotes: rows.map(([d, c]) => ({ date: d + 'T13:3
   behaviour.NVDA = () => ({ quotes: [] });
   await cmdUpdatePrices();
   ok(/0 symbol\(s\) succeeded.*2 failed/.test(dialogLog.pop()), 'failures counted');
+
+  // 6. fetchPriceHistory (reports fetching missing price history): from..to + 1 day, failures, rate limit stops
+  calls.length = 0;
+  behaviour.SOLD = () => candles(['2026-01-05', 12.345], ['2026-01-06', 13]);
+  behaviour.GONE = () => ({ quotes: [] });
+  let fph = await fetchPriceHistory([{ symbol: 'SOLD', from: '2026-01-01', to: '2026-01-06' }, { symbol: 'GONE', from: '2026-02-01', to: '2026-02-03' }]);
+  eq(calls.map(c => [c.symbol, c.p1, c.p2]), [['SOLD', '2026-01-01', '2026-01-07'], ['GONE', '2026-02-01', '2026-02-04']], 'history fetched from..to + 1 day');
+  eq([fph.updated, fph.closes, fph.failures], [1, 2, [{ symbol: 'GONE', reason: 'no price data in response' }]], 'result counts and failures');
+  eq(DB.query("SELECT Date, Price FROM Prices WHERE Symbol='SOLD' ORDER BY Date").map(r => [r.Date, r.Price]), [['2026-01-05', 12.35], ['2026-01-06', 13]],
+     'fetched closes stored');
+  calls.length = 0;
+  behaviour.SOLD = () => { throw new Error('MCP error 429'); };
+  fph = await fetchPriceHistory([{ symbol: 'SOLD', from: '2026-01-01', to: '2026-01-06' }, { symbol: 'GONE', from: '2026-02-01', to: '2026-02-03' }]);
+  eq([calls.length, fph.failures.map(f => f.symbol)], [15, ['SOLD', 'GONE']], 'persistent rate limit: stops, remaining requests reported');
+  eq((await fetchPriceHistory([])).updated, 0, 'nothing to fetch');
+
+  // 7. updateSymbolPrices (Prices view Update action): same window as Tools > Update prices
+  calls.length = 0;
+  behaviour.SOLD = () => candles(['2026-01-06', 14], ['2026-01-07', 15]);
+  const up = await updateSymbolPrices('SOLD');
+  eq([calls.map(c => [c.symbol, c.p1, c.p2, c.interval]), up], [[['SOLD', yearAgo > '2026-01-06' ? yearAgo : '2026-01-06', _addDaysStr(today, 1), '1d']], { closes: 2 }],
+     'one symbol: from its last stored date (or today - 1 year) to tomorrow');
+  eq(DB.query("SELECT Price FROM Prices WHERE Symbol='SOLD' AND Date='2026-01-06'")[0].Price, 14, 'last stored date replaced');
+  calls.length = 0;
+  const upNew = await updateSymbolPrices('NEWSYM').catch(e => ({ reason: e.message }));
+  eq([calls[0] && calls[0].p1], [yearAgo], 'no stored prices: from today - 1 year');
 })();

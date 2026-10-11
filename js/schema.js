@@ -1,6 +1,6 @@
 // Database schema version written to Info.Schema_Version. Files with an older
 // (pre-2.0) or newer schema are refused by DB.loadFromBytes().
-const SCHEMA_VERSION = '2.0';
+const SCHEMA_VERSION = '2.3';
 const SCHEMA_MIN_VERSION = '2.0';
 
 const SCHEMA_SQL = `
@@ -68,6 +68,7 @@ const SCHEMA_SQL = `
     Holding_ID     INTEGER PRIMARY KEY AUTOINCREMENT,
     Parent_ID      INTEGER,
     Transaction_ID INTEGER,
+    Date           TEXT,
     Timestamp      TEXT    NOT NULL,
     Account_ID     INTEGER NOT NULL,
     Symbol         TEXT    NOT NULL,
@@ -83,6 +84,26 @@ const SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_ledger_timestamp   ON Ledger(Timestamp);
   CREATE INDEX IF NOT EXISTS idx_ledger_account_id  ON Ledger(Account_ID);
   CREATE INDEX IF NOT EXISTS idx_ledger_transaction ON Ledger(Transaction_ID);
+  CREATE INDEX IF NOT EXISTS idx_ledger_date        ON Ledger(Date);
+  -- Cash balance history per account, same model as the Ledger: every change supersedes the active record
+  CREATE TABLE IF NOT EXISTS Balance (
+    Balance_ID     INTEGER PRIMARY KEY AUTOINCREMENT,
+    Parent_ID      INTEGER,
+    Transaction_ID INTEGER,
+    Date           TEXT,
+    Timestamp      TEXT    NOT NULL,
+    Account_ID     INTEGER NOT NULL,
+    Cash           REAL    NOT NULL,
+    Currency       TEXT    DEFAULT 'USD',
+    Active         INTEGER DEFAULT 1,
+    FOREIGN KEY (Parent_ID)      REFERENCES Balance(Balance_ID),
+    FOREIGN KEY (Transaction_ID) REFERENCES Transactions(Transaction_ID),
+    FOREIGN KEY (Account_ID)     REFERENCES Accounts(Account_ID)
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_balance_active ON Balance(Account_ID) WHERE Active = 1;
+  CREATE INDEX IF NOT EXISTS idx_balance_account     ON Balance(Account_ID);
+  CREATE INDEX IF NOT EXISTS idx_balance_transaction ON Balance(Transaction_ID);
+  CREATE INDEX IF NOT EXISTS idx_balance_date        ON Balance(Date);
   CREATE TABLE IF NOT EXISTS Options (
     Option_ID       INTEGER PRIMARY KEY AUTOINCREMENT,
     Parent_ID       INTEGER,
@@ -146,26 +167,33 @@ const SCHEMA_SQL = `
 // Import rules inserted into a new database (see VERSION_2.md, Rules table).
 // [Rule_Order, Pattern, Case_Sensitive, Symbol_Required, Category, Effect, Sign, Description]
 const RULES_SEED = [
-  [10,  '^(JOURNALED)',                                    1, 0, 'Other',    'Ignore',       null, 'journaling transactions'],
-  [20,  '^(DIVIDEND)',                                     1, 1, 'Dividend', 'Cash',         null, 'cash dividend'],
-  [25,  '^(YOU BOUGHT RSU)',                               1, 1, 'Asset',    'RSU',          null, 'recording of RSU vesting transactions'],
-  [30,  '^(YOU BOUGHT)',                                   1, 1, 'Asset',    'Trade',        null, 'equity/option purchase'],
-  [40,  '^(YOU SOLD)',                                     1, 1, 'Asset',    'Trade',        null, 'equity/option sale'],
+  [10,  '^(JOURNALED)',                                     1, 0, 'Other',    'Ignore',       null, 'journaling transactions'],
+  [20,  '^(DIVIDEND)',                                      1, 1, 'Dividend', 'Cash',         null, 'cash dividend'],
+  [25,  '^(YOU BOUGHT RSU)',                                1, 1, 'Asset',    'RSU',          null, 'record transaction for vesting RSUs'],
+  [30,  '^(YOU BOUGHT)',                                    1, 1, 'Asset',    'Trade',        null, 'equity/option purchase'],
+  [40,  '^(YOU SOLD)',                                      1, 1, 'Asset',    'Trade',        null, 'equity/option sale'],
   [45,  '^(REINVESTMENT).*\\((SPAXX|FDRXX|FZFXX|SWVXX)\\)', 1, 1, 'Other',    'Other',        null, 'reinvestment into a cash-like money market fund, recorded only'],
-  [50,  '^(REINVESTMENT)',                                 1, 1, 'Asset',    'Reinvestment', null, 'reinvestment transactions'],
-  [60,  '^(DISTRIBUTION)',                                 1, 1, 'Asset',    'Distribution', null, 'new shares distributed (e.g. spinoff); Amount is 0, quantity is added, cost basis is kept from the parent entry (0 for a new entry)'],
-  [70,  '^(EXPIRED)',                                      1, 1, 'Other',    'Other',        null, 'expired options, the expiration date already provides the necessary info'],
-  [80,  '^(REVERSE SPLIT)',                                1, 1, 'Asset',    'Split',        null, 'reverse split; the transaction quantity replaces the held quantity, cost basis is kept'],
-  [90,  '^(MERGER)',                                       1, 1, 'Asset',    'Merger',       null, 'merger, a new asset symbol is likely but the cost basis could be tricky'],
-  [100, '^(Buy)',                                          1, 1, 'Asset',    'Trade',        null, 'equity/option purchase'],
-  [110, '^(Sell)',                                         1, 1, 'Asset',    'Trade',        null, 'equity/option sale'],
-  [112, '^(ASSIGNED)',                                     1, 1, 'Asset',    'Other',        null, 'option assignment, recorded only; the resulting share sale is reported separately (e.g. YOU SOLD)'],
-  [114, '^(EXERCISED)',                                    1, 1, 'Asset',    'Other',        null, 'option exercise, recorded only; the resulting share purchase is reported separately (e.g. YOU BOUGHT)'],
-  [120, '^(.+)(Dividend)',                                 1, 1, 'Dividend', 'Cash',         null, 'cash dividend'],
-  [130, '^(ADR Mgmt Fee)',                                 1, 1, 'Fee',      'Cash',         null, 'ADR management fee'],
-  [140, '^(Margin Interest)',                              1, 0, 'Margin',   'Cash',         null, 'margin interest'],
-  [150, '^(Credit Interest)',                              1, 0, 'Interest', 'Cash',         null, 'cash interest'],
-  [160, '^(FOREIGN TAX)',                                  1, 1, 'Tax',      'Cash',         -1,   'foreign tax withheld from dividends'],
-  [170, '^(Deposit)',                                      0, 0, 'Transfer', 'Cash',         1,    'cash deposit into the account'],
-  [180, '^(Withdrawal)',                                   0, 0, 'Transfer', 'Cash',         -1,   'cash withdrawal from the account'],
+  [50,  '^(REINVESTMENT)',                                  1, 1, 'Asset',    'Reinvestment', null, 'reinvestment transactions'],
+  [60,  '^(DISTRIBUTION)',                                  1, 1, 'Asset',    'Distribution', null, 'new shares distributed (e.g. spinoff); quantity and Amount are added to the quantity and cost basis, no cash effect'],
+  [70,  '^(EXPIRED)',                                       0, 1, 'Other',    'Other',        null, 'expired options, the expiration date already provides the necessary info'],
+  [80,  '^(REVERSE SPLIT)',                                 1, 1, 'Asset',    'Split',        null, 'reverse split; the transaction quantity and Amount replace the held quantity and cost basis, no cash effect'],
+  [90,  '^(MERGER)',                                        1, 1, 'Asset',    'Merger',       null, 'merger, a new asset symbol is likely but the cost basis could be tricky'],
+  [100, '^(Buy)',                                           1, 1, 'Asset',    'Trade',        null, 'equity/option purchase'],
+  [110, '^(Sell)',                                          1, 1, 'Asset',    'Trade',        null, 'equity/option sale'],
+  [112, '^(ASSIGNED)',                                      1, 1, 'Asset',    'Other',        null, 'option assignment, recorded only; the resulting share sale is reported separately (e.g. YOU SOLD)'],
+  [114, '^(EXERCISED)',                                     1, 1, 'Asset',    'Other',        null, 'option exercise, recorded only; the resulting share purchase is reported separately (e.g. YOU BOUGHT)'],
+  [120, '^(.+)(Dividend)',                                  1, 1, 'Dividend', 'Cash',         null, 'cash dividend'],
+  [130, '^(ADR Mgmt Fee)',                                  1, 1, 'Fee',      'Cash',         null, 'ADR management fee'],
+  [140, '^(Margin Interest)',                               0, 0, 'Margin',   'Cash',         null, 'margin interest'],
+  [150, '^(Credit Interest)',                               0, 0, 'Interest', 'Cash',         null, 'cash interest'],
+  [160, '^(FOREIGN TAX)',                                   1, 1, 'Tax',      'Cash',         -1,   'foreign tax withheld from dividends'],
+  [170, '^(Deposit)',                                       0, 0, 'Transfer', 'Cash',         1,    'cash deposit into the account'],
+  [180, '^(Withdrawal)',                                    0, 0, 'Transfer', 'Cash',         -1,   'cash withdrawal from the account'],
+  [200, '^(SHORT VS MARGIN)',                               1, 0, 'Other',    'Ignore',       null, 'journaling of margin positions'],
+  [210, '^(Change in Market Value)',                        1, 0, 'Other',    'Ignore',       null, 'change of market value record'],
+  [220, '^(Dividend)',                                      1, 0, 'Dividend', 'Cash',         null, 'cash dividend'],
+  [230, '^(DIRECT DEPOSIT)',                                1, 0, 'Transfer', 'Cash',         null, 'direct deposit'],
+  [240, '^(Exchange)\\s+(In|Out)',                          1, 0, 'Other',    'Ignore',       null, 'exchange of assets in a managed account'],
+  [250, '^(FEE)',                                           0, 0, 'Fee',      'Cash',         null, 'fee charged'],
+  [260, '^(.*)(Cash Div)',                                  1, 0, 'Dividend', 'Cash',         null, 'cash dividend'],
 ];

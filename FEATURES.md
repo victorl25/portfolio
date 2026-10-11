@@ -1,7 +1,7 @@
 # Features toimplement in the future
 
-1. Realized taxable gains and losses report (deferred from version 2.0) — derivable from the Ledger Parent chain (average cost) or computed FIFO from Transactions
-2. Portfolio balance history / trend chart with YTD and 1-year change net of Transfer flows (deferred from version 2.0) — daily holdings replayed from Transactions × daily Prices + cash; show an error when a year of price data is not available
+1. ~~Realized taxable gains and losses report~~ — implemented as Reports > Gains/Losses (LIFO lots from the transaction history)
+2. Portfolio balance history / trend chart (Reports > Portfolio trend implements the holdings-value trend from the Ledger; still open: cash, and YTD/1-year change net of Transfer flows) — originally deferred from version 2.0 — daily holdings replayed from Transactions × daily Prices + cash; show an error when a year of price data is not available
 3. Option position valuation (option quotes) so written calls/puts can be included in the portfolio value
 
 

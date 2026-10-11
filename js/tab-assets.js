@@ -3,10 +3,11 @@ const AssetsTab = (() => {
   let _table = null;
   let _selectedRow = null;
   let _isNew = false;
+  let _showAll = false;   // "Show all assets": also assets with quantity 0 (unchecked by default)
 
   function open() {
     App.Tabs.open(TAB_ID, 'Assets', panel => _build(panel),
-      { refresh: _refresh, onClose: () => { _table = null; _selectedRow = null; _isNew = false; } });
+      { refresh: _refresh, onClose: () => { _table = null; _selectedRow = null; _isNew = false; _showAll = false; } });
   }
 
   function _build(panel) {
@@ -20,6 +21,7 @@ const AssetsTab = (() => {
               <div class="form-field"><label>Symbol</label><input class="form-control form-readonly" id="ast-f-symbol" readonly></div>
               <div class="form-field"><label>Description</label><input class="form-control" id="ast-f-desc"></div>
               <div class="form-field"><label>Note</label><input class="form-control" id="ast-f-notes" placeholder="latest note; a changed note is added to the history"></div>
+              <label class="form-toggle"><input type="checkbox" id="ast-f-showall"${_showAll ? ' checked' : ''}> Show all assets</label>
             </div>
             <div class="form-col">
               <div class="form-field"><label>Type</label>
@@ -47,6 +49,8 @@ const AssetsTab = (() => {
         </div>
       </div>`;
 
+    panel.querySelector('#ast-f-showall').addEventListener('change', e => { _showAll = e.target.checked; _refresh(); });
+
     _table = new Tabulator('#ast-table-wrap', {
       data: _loadData(),
       layout: 'fitColumns',
@@ -73,11 +77,15 @@ const AssetsTab = (() => {
         { title: 'Theme',       field: 'Theme',       widthGrow: 2, headerFilter: true, headerSortTristate: true },
         { title: 'Category',    field: 'Category',    widthGrow: 2, headerFilter: true, headerSortTristate: true },
         { title: 'Notes',       field: 'Notes',       widthGrow: 2, headerFilter: true, headerSortTristate: true },
-        { title: 'Action', field: 'NoteCount', width: 80, hozAlign: 'center', headerSort: false,
-          formatter: cell => cell.getValue() > 0 ? `<button class="act-btn analyze-btn">Notes</button>` : '',
+        // Analyze (Analyze > Asset performance for the symbol, as on the Portfolio tab) and, when the asset has notes, Notes
+        { title: 'Action', field: 'NoteCount', width: 150, hozAlign: 'center', headerSort: false,
+          formatter: cell => `<button class="act-btn analyze-btn" data-act="analyze">Analyze</button>` +
+            (cell.getValue() > 0 ? ` <button class="act-btn analyze-btn" data-act="notes">Notes</button>` : ''),
           cellClick: (e, cell) => {
             if (!e.target.classList.contains('act-btn')) return;
-            _showNotes(cell.getRow().getData().Symbol);
+            const symbol = cell.getRow().getData().Symbol;
+            if (e.target.dataset.act === 'analyze') AnalysisTab.openAssetFor(symbol);
+            else _showNotes(symbol);
           }
         }
       ]
@@ -118,16 +126,18 @@ const AssetsTab = (() => {
     });
   }
 
-  function _loadData() {
+  // Active assets with a non-zero quantity (v_holdings), or all active assets when "Show all assets" is
+  // checked (quantity 0 for those not held)
+  function _loadData(showAll = _showAll) {
     return DB.query(`
       SELECT a.Symbol, a.Description, a.Type, a.Category, a.Theme, a.Active,
-        h.Quantity,
+        COALESCE(h.Quantity, 0) AS Quantity,
         (SELECT n.Note FROM Notes n WHERE n.Symbol = a.Symbol ORDER BY n.Timestamp DESC, n.Note_ID DESC LIMIT 1) AS Notes,
         (SELECT COUNT(*) FROM Notes n WHERE n.Symbol = a.Symbol) AS NoteCount
       FROM Assets a
-      JOIN v_holdings h ON a.Symbol = h.Symbol   -- held assets only (v_holdings excludes quantity 0)
-      WHERE a.Active = 1 AND h.Quantity <> 0
-      ORDER BY a.Symbol`);
+      LEFT JOIN v_holdings h ON a.Symbol = h.Symbol   -- v_holdings excludes quantity 0
+      WHERE a.Active = 1 AND (? = 1 OR COALESCE(h.Quantity, 0) <> 0)
+      ORDER BY a.Symbol`, [showAll ? 1 : 0]);
   }
 
   // Popup with all notes of an asset in chronological order
@@ -264,5 +274,5 @@ const AssetsTab = (() => {
     if (_table) _table.replaceData(_loadData());
   }
 
-  return { open, refresh: _refresh };
+  return { open, refresh: _refresh, loadData: _loadData };
 })();

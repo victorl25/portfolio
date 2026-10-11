@@ -91,7 +91,12 @@ globalThis.console = { log: (...a) => __print(a.map(String).join(' ')), warn: (.
 globalThis.SQL = { Database: class {
   // "bytes" are { __db: handle } objects from export() or __dbFile(path)
   constructor(bytes) { this.h = bytes ? __clone(bytes.__db) : __newDb(); }
-  exec(sql, params) { const r = JSON.parse(__exec(this.h, sql, JSON.stringify(params || []))); if (r.err) throw new Error(r.err); return r.ok; }
+  exec(sql, params) {
+    // like sql.js: binding a value of an unknown type (e.g. undefined) throws a plain string, not an Error
+    for (const v of params || []) if (v === undefined || typeof v === 'function' || (typeof v === 'object' && v !== null && v.length == null))
+      throw `Wrong API use : tried to bind a value of an unknown type (${v}).`;
+    const r = JSON.parse(__exec(this.h, sql, JSON.stringify(params || []))); if (r.err) throw new Error(r.err); return r.ok;
+  }
   run(sql, params) { this.exec(sql, params); return this; }
   export() { return { __db: __clone(this.h) }; }
   close() { __close(this.h); }

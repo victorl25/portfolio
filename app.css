@@ -788,3 +788,29 @@ a.cell-link:hover { text-decoration: underline; }
 .rpt-filters-label { font-weight: 600; color: #2c3e50; }
 .rpt-filter { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; white-space: nowrap; }
 .rpt-filter-sub { color: #888; font-size: 12px; }
+.rpt-table td.rpt-neg { color: #c0392b; }
+.rpt-warning { max-width: 560px; margin-top: 12px; font-size: 12px; color: #c0392b; }
+
+/* Reports > Portfolio trend */
+.trd-layout { display: flex; flex-direction: column; height: 100%; padding: 16px 20px; box-sizing: border-box; }
+.trd-chart { flex: 1 1 auto; min-height: 300px; }
+.trd-legend { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 4px 0 8px; font-size: 13px; color: #333; }
+.trd-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.trd-legend-val { font-weight: 600; }
+.trd-pos { color: #27ae60; }
+.trd-swatch { display: inline-block; width: 16px; height: 3px; border-radius: 1px; vertical-align: middle; margin-right: 4px; }
+.trd-swatch-main { height: 4px; }
+.trd-note { font-size: 12px; color: #666; margin-top: 6px; }
+.trd-zero { stroke: #7f8c8d; stroke-width: 1; }
+.trd-cross { stroke: #7f8c8d; stroke-width: 1; stroke-dasharray: 4 4; pointer-events: none; }
+.trd-tip { position: absolute; pointer-events: none; background: rgba(255,255,255,0.96); border: 1px solid #d0d6de;
+           border-radius: 4px; padding: 6px 8px; font-size: 12px; color: #333; box-shadow: 0 2px 6px rgba(0,0,0,0.12); white-space: nowrap; }
+.trd-tip-date { font-weight: 600; margin-bottom: 3px; color: #2c3e50; }
+.trd-tip-val { color: #777; margin-left: 6px; }
+
+/* Transactions view: ledger choice when editing an earlier transaction */
+.dlg-choice { display: block; margin: 8px 0; font-size: 13px; line-height: 1.4; cursor: pointer; }
+.dlg-choice input { margin-right: 6px; }
+
+/* Form toggle at the bottom of a form column (e.g. Assets view "Show all assets") */
+.form-toggle { margin-top: auto; display: flex; align-items: center; gap: 6px; font-size: 12px; color: #444; cursor: pointer; user-select: none; }

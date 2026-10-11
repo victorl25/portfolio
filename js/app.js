@@ -1,4 +1,4 @@
-const APP_VERSION = '2.0';
+const APP_VERSION = '2.3';
 
 // ── State ─────────────────────────────────────────────────────────────────
 let _lastFileHandle = null;
@@ -347,8 +347,9 @@ async function cmdOpen() {
   } catch { return; }
   const file  = await fh.getFile();
   const bytes = new Uint8Array(await file.arrayBuffer());
+  let loadResult;
   try {
-    DB.loadFromBytes(bytes);
+    loadResult = DB.loadFromBytes(bytes);
   } catch (e) {
     // Unsupported schema version or not a database: keep the current database open
     await Dialogs.alertHtml(`<p>${_esc(e.message)}</p>`, `Cannot open ${file.name}`);
@@ -358,9 +359,10 @@ async function cmdOpen() {
   _dbFilename     = file.name;
   _lastPrefix     = _extractPrefix(file.name);
   await _idbSet('dbFile', fh);
-  DB.resetChangeCount();
+  if (!loadResult.upgradedFrom) DB.resetChangeCount();
   _renderStatus();
   _resetTabs();
+  if (loadResult.upgradedFrom) await _upgradeNotice(file.name, loadResult.upgradedFrom);
 }
 
 async function cmdSave() {
@@ -462,53 +464,20 @@ async function cmdUpdatePrices() {
 
   let updated = 0, closes = 0;
   const failures = [];
-  const DELAY_MS = 100;
-  const RATE_LIMIT_WAIT_MS = 1000;
-  const MAX_ATTEMPTS = 15;
-  const isRateLimited = v => /too many requests|\b429\b/i.test(String(v ?? ''));
-  const sleep = ms => new Promise(r => setTimeout(r, ms));
-  const yearAgo  = _addDaysStr(_todayStr(), -365);
-  const tomorrow = _addDaysStr(_todayStr(), 1);
   let abortedOn = null;
 
   for (let i = 0; i < assets.length && !abortedOn; i++) {
     const a = assets[i];
     c.querySelector('#upd-msg').textContent = `Updating ${i + 1} / ${assets.length}: ${a.Symbol}…`;
     c.querySelector('#upd-detail').textContent = '';
-    const last  = DB.query('SELECT MAX(Date) AS D FROM Prices WHERE Symbol=? AND Valid=1', [a.Symbol])[0]?.D;
-    const start = last && last > yearAgo ? last : yearAgo;
-
-    for (let attempt = 1; ; attempt++) {
-      let chart, error;
-      try { chart = await YahooFinance.getChart(a.Symbol, start, tomorrow, '1d'); }
-      catch (e) { error = e; }
-
-      const limited = error ? isRateLimited(error.message) : typeof chart === 'string' && isRateLimited(chart);
-      if (limited) {
-        if (attempt >= MAX_ATTEMPTS) { abortedOn = a.Symbol; break; }
-        c.querySelector('#upd-detail').textContent =
-          `Too Many Requests — waiting 1 s, retrying ${a.Symbol} (attempt ${attempt + 1} of ${MAX_ATTEMPTS})…`;
-        await sleep(RATE_LIMIT_WAIT_MS);
-        continue;
-      }
-
-      if (error) {
-        failures.push({ symbol: a.Symbol, reason: error.message });
-      } else if (typeof chart === 'string') {
-        failures.push({ symbol: a.Symbol, reason: chart.slice(0, 200) });
-      } else {
-        const quotes = (chart?.quotes || []).filter(q => q.close != null && q.date);
-        if (quotes.length) {
-          for (const q of quotes) _upsertPrice(a.Symbol, _isoToDate(q.date), q.close);
-          closes += quotes.length;
-          updated++;
-        } else {
-          failures.push({ symbol: a.Symbol, reason: 'no price data in response' });
-        }
-      }
-      break;
-    }
-    if (!abortedOn) await sleep(DELAY_MS);
+    const r = await updateSymbolPrices(a.Symbol, attempt => {
+      c.querySelector('#upd-detail').textContent =
+        `Too Many Requests — waiting 1 s, retrying ${a.Symbol} (attempt ${attempt} of ${PRICE_MAX_ATTEMPTS})…`;
+    });
+    if (r.limited) { abortedOn = a.Symbol; break; }
+    if (r.reason) failures.push({ symbol: a.Symbol, reason: r.reason });
+    else { closes += r.closes; updated++; }
+    await _sleep(PRICE_DELAY_MS);
   }
 
   Dialogs.close();
@@ -516,7 +485,7 @@ async function cmdUpdatePrices() {
 
   if (abortedOn) {
     const remaining = assets.length - updated - failures.length;
-    failures.push({ symbol: abortedOn, reason: `Too Many Requests on all ${MAX_ATTEMPTS} attempts — update stopped` });
+    failures.push({ symbol: abortedOn, reason: `Too Many Requests on all ${PRICE_MAX_ATTEMPTS} attempts — update stopped` });
     await _showResultDialog(
       `Price update terminated: the Yahoo Finance server kept returning "Too Many Requests" for ${abortedOn}. ` +
       `${updated} symbol(s) were updated before stopping; ${remaining} symbol(s) were not updated. Try again later.`,
@@ -527,6 +496,83 @@ async function cmdUpdatePrices() {
   await _showResultDialog(
     `Prices updated: ${updated} symbol(s) succeeded (${closes} daily closes), ${failures.length} failed.`,
     failures, 'Update Prices');
+}
+
+// get_chart throttling: 0.1 s after each call; "Too Many Requests" waits 1 s and retries, up to 15 attempts
+const PRICE_DELAY_MS = 100;
+const PRICE_RATE_LIMIT_WAIT_MS = 1000;
+const PRICE_MAX_ATTEMPTS = 15;
+const _isRateLimited = v => /too many requests|\b429\b/i.test(String(v ?? ''));
+const _sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// Fetches the daily closes of a symbol from `start` to `end` (get_chart) and upserts them into Prices.
+// Returns { closes } on success, { reason } on failure, or { limited: true } when the server kept answering
+// "Too Many Requests"; onRetry(attempt) is called before each retry.
+async function _fetchCloses(symbol, start, end, onRetry) {
+  for (let attempt = 1; ; attempt++) {
+    let chart, error;
+    try { chart = await YahooFinance.getChart(symbol, start, end, '1d'); }
+    catch (e) { error = e; }
+    const limited = error ? _isRateLimited(error.message) : typeof chart === 'string' && _isRateLimited(chart);
+    if (limited) {
+      if (attempt >= PRICE_MAX_ATTEMPTS) return { limited: true };
+      if (onRetry) onRetry(attempt + 1);
+      await _sleep(PRICE_RATE_LIMIT_WAIT_MS);
+      continue;
+    }
+    if (error) return { reason: error.message };
+    if (typeof chart === 'string') return { reason: chart.slice(0, 200) };
+    const quotes = (chart?.quotes || []).filter(q => q.close != null && q.date);
+    if (!quotes.length) return { reason: 'no price data in response' };
+    for (const q of quotes) _upsertPrice(symbol, _isoToDate(q.date), q.close);
+    return { closes: quotes.length };
+  }
+}
+
+// Updates the stored daily closes of one symbol the way Tools > Update prices does: from the later of
+// today − 1 year and its last stored price date (refetched, so an intraday price becomes the final close)
+// through tomorrow. Returns the _fetchCloses result ({ closes } / { reason } / { limited: true }).
+async function updateSymbolPrices(symbol, onRetry) {
+  const yearAgo = _addDaysStr(_todayStr(), -365);
+  const last  = DB.query('SELECT MAX(Date) AS D FROM Prices WHERE Symbol=? AND Valid=1', [symbol])[0]?.D;
+  const start = last && last > yearAgo ? last : yearAgo;
+  return _fetchCloses(symbol, start, _addDaysStr(_todayStr(), 1), onRetry);
+}
+
+// Fetches missing price history for a report: requests [{ symbol, from, to }] (closes from `from` through
+// `to` + 1 day), with a progress dialog. Stops when the server keeps rate limiting.
+// Returns { updated, closes, failures: [{ symbol, reason }] }.
+async function fetchPriceHistory(requests, title = 'Fetching Prices') {
+  const result = { updated: 0, closes: 0, failures: [] };
+  if (!requests.length) return result;
+  const c = Dialogs.custom(`
+    <div class="dlg dlg-wide">
+      <div class="dlg-title">${_esc(title)}</div>
+      <div class="dlg-body">
+        <p id="fph-msg">Starting…</p>
+        <div style="font-size:12px;color:#888;" id="fph-detail"></div>
+      </div>
+    </div>`);
+  try {
+    for (let i = 0; i < requests.length; i++) {
+      const { symbol, from, to } = requests[i];
+      c.querySelector('#fph-msg').textContent = `Fetching ${i + 1} / ${requests.length}: ${symbol} (${from} to ${to})…`;
+      c.querySelector('#fph-detail').textContent = '';
+      const r = await _fetchCloses(symbol, from, _addDaysStr(to, 1), attempt => {
+        c.querySelector('#fph-detail').textContent = `Too Many Requests — waiting 1 s, retrying ${symbol} (attempt ${attempt} of ${PRICE_MAX_ATTEMPTS})…`;
+      });
+      if (r.limited) {
+        result.failures.push(...requests.slice(i).map(q => ({ symbol: q.symbol, reason: 'Too Many Requests — not fetched' })));
+        break;
+      }
+      if (r.reason) result.failures.push({ symbol, reason: r.reason });
+      else { result.updated++; result.closes += r.closes; }
+      await _sleep(PRICE_DELAY_MS);
+    }
+  } finally {
+    Dialogs.close();
+  }
+  return result;
 }
 
 // Inserts or replaces the daily price of a symbol (Prices is unique per Symbol + Date).
@@ -634,9 +680,10 @@ function _initMenus() {
   cmd('cmd-analyze-asset-performance').addEventListener('click', () => { _closeMenus(); AnalysisTab.openAsset(); });
 
   // Reports: value by Theme (AnalysisTab)
-  cmd('cmd-report-portfolio-theme').addEventListener('click', () => { _closeMenus(); AnalysisTab.openPortfolio(); });
-  cmd('cmd-report-account-theme').addEventListener('click', () => { _closeMenus(); AnalysisTab.openAccount(); });
+  cmd('cmd-report-themes').addEventListener('click', () => { _closeMenus(); AnalysisTab.openThemes(); });
+  cmd('cmd-report-trend').addEventListener('click', () => { _closeMenus(); TrendTab.open(); });
   cmd('cmd-report-dividends').addEventListener('click', () => { _closeMenus(); DividendsTab.open(); });
+  cmd('cmd-report-gains').addEventListener('click', () => { _closeMenus(); GainsTab.open(); });
 
   cmd('cmd-update-prices').addEventListener('click', () => { _closeMenus(); cmdUpdatePrices(); });
   cmd('cmd-query-db').addEventListener('click', () => { _closeMenus(); QueryTab.open(); });
@@ -647,6 +694,12 @@ function _initMenus() {
 
 function _closeMenus() {
   document.querySelectorAll('.menu-item.open').forEach(m => m.classList.remove('open'));
+}
+
+// Tells the user that an older 2.x database was upgraded in memory (saving keeps the upgrade)
+async function _upgradeNotice(filename, fromVersion) {
+  await Dialogs.alert(`${filename} was upgraded from schema ${fromVersion} to ${SCHEMA_VERSION}. ` +
+    'Save the portfolio to keep the upgrade; the original file is left unchanged.', 'Database Upgraded');
 }
 
 // ── Startup ───────────────────────────────────────────────────────────────
@@ -676,6 +729,7 @@ async function _startup() {
 
   let loaded = false;
   let refusal = null;   // message shown after startup when the auto-loaded file is refused
+  let upgradedFrom = null;
 
   if (dataDir && dbFile) {
     const url = `${_dataDirUrl}/${dbFile}`;
@@ -683,7 +737,7 @@ async function _startup() {
       const res   = await fetch(url);
       const buf   = await res.arrayBuffer();
       const bytes = new Uint8Array(buf);
-      DB.loadFromBytes(bytes);
+      upgradedFrom = DB.loadFromBytes(bytes).upgradedFrom;
       _dbFilename = dbFile;
       _lastPrefix = _extractPrefix(dbFile);
       loaded = true;
@@ -710,10 +764,11 @@ async function _startup() {
     _dbFilename = '';
   }
 
-  DB.resetChangeCount();
+  if (!upgradedFrom) DB.resetChangeCount();
   _renderStatus();
   _resetTabs();
   if (refusal) await Dialogs.alertHtml(refusal.html, refusal.title);
+  if (upgradedFrom) await _upgradeNotice(dbFile, upgradedFrom);
 }
 
 initSqlJs({ locateFile: f => `lib/${f}` }).then(SqlLib => {
